@@ -228,9 +228,7 @@ void loop_temp()
     return;
   }
 
-  // TODO arrondir temp et humidité au 1/100
-
-  snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"temperature\":%f,\"humidity\":%f}", temperature, humidity);
+  snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"temperature\":%.1f,\"humidity\":%.1f}", temperature, humidity);
 
   Serial.print("Publish message: ");
   Serial.println(mqttMsg);
@@ -239,10 +237,16 @@ void loop_temp()
 
 void loop()
 {
+  static unsigned long lastTime = 0;
+  unsigned long currentTime = millis();
+  
   mqtt_reconnect();
   client.loop();
-  loop_temp();
 
-//TODO replace by millis()
-  delay(5000);
+  if (currentTime - lastTime > 5000) {
+    lastTime = currentTime;
+    loop_temp();
+  }
+
+  delay(500);
 }
