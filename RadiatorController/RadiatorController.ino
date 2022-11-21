@@ -1,3 +1,4 @@
+#include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <DHT.h>
@@ -16,6 +17,10 @@
 #define PIN_RADIATOR_CTRL_NEG 2 // Builtin LED
 #define PIN_RADIATOR_CTRL_POS 0
 
+#define EEPROM_TEMPERATURE_OFFSET_ADDR  0x00  // size 4 bytes
+#define EEPROM_HUMIDITY_OFFSET_ADDR     0x04  // size 4 bytes
+#define EEPROM_SIZE                     (8)
+
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
@@ -26,6 +31,8 @@
 #define MQTT_TOPIC_RAD_SENSOR   MQTT_TOPIC_PREFFIX"/radiator/sensor"
 #define MQTT_TOPIC_RAD_SETPOINT MQTT_TOPIC_PREFFIX"/radiator/setpoint" //replace by switch
 #define MQTT_MSG_BUFFER_SIZE    (50)
+#define MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET   MQTT_TOPIC_PREFFIX"/radiator/set_temperature_offset"
+#define MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET      MQTT_TOPIC_PREFFIX"/radiator/set_humidity_offset"
 
 // DHT22
 #define DHT_PIN   PIN_DHT22_DATA
@@ -36,6 +43,8 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 char mqttMsg[MQTT_MSG_BUFFER_SIZE];
+float sensorTemperatureOffset = 0;
+float sensorHumidityOffset = 0;
 
 void setup_wifi()
 {
@@ -78,6 +87,8 @@ void mqtt_reconnect()
     {
       Serial.println("connected");
       client.subscribe(MQTT_TOPIC_RAD_SETPOINT);
+      client.subscribe(MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET);
+      client.subscribe(MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET);
     }
     else
     {
@@ -110,6 +121,24 @@ void setup()
   setup_mqtt();
   setup_dht();
 
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(EEPROM_TEMPERATURE_OFFSET_ADDR, sensorTemperatureOffset);
+  EEPROM.get(EEPROM_HUMIDITY_OFFSET_ADDR, sensorHumidityOffset);
+  EEPROM.end();
+
+  if (isnan(sensorTemperatureOffset)) {
+    sensorTemperatureOffset = 0;
+  }
+
+  if (isnan(sensorHumidityOffset)) {
+    sensorHumidityOffset = 0;
+  }
+
+  Serial.print("Temperature offset: ");
+  Serial.println(sensorTemperatureOffset);
+  Serial.print("Humidity offset: ");
+  Serial.println(sensorHumidityOffset);
+
   delay(1000);
 
   pinMode(PIN_RADIATOR_CTRL_NEG, OUTPUT);
@@ -132,28 +161,60 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
   }
   Serial.println();
 
-  if (strncmp((char*) payload, "ON", MIN(len, 2)) == 0)
-  {
-    Serial.println("Set radiator ON");
-    digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_DISABLE);
-    digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+  if (strcmp(topic, MQTT_TOPIC_RAD_SETPOINT) == 0) {
+    if (strncmp((char*) payload, "ON", MIN(len, 2)) == 0)
+    {
+      Serial.println("Set radiator ON");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_DISABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+    }
+    else if (strncmp((char*) payload, "OFF", MIN(len, 3)) == 0)
+    {
+      Serial.println("Set radiator OFF");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+    }
+    else
+    {
+      Serial.println("Invalid message receive!");
+    }
   }
-  else if (strncmp((char*) payload, "OFF", MIN(len, 3)) == 0)
-  {
-    Serial.println("Set radiator OFF");
-    digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
-    digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+  else if (strcmp(topic, MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET) == 0) {
+    char *endptr = nullptr;
+    float val = strtof((char*)payload, &endptr);
+    Serial.print("Set temperature offset to ");
+    Serial.println(val);
+    if ((char*)payload == endptr) {
+      Serial.println("Invalid temperature offset value");
+    }
+    else if (val != sensorTemperatureOffset) {
+      sensorTemperatureOffset = val;
+      EEPROM.begin(EEPROM_SIZE);
+      EEPROM.put(EEPROM_TEMPERATURE_OFFSET_ADDR, sensorTemperatureOffset);
+      EEPROM.end();
+    }
   }
-  else
-  {
-    Serial.println("Invalid message receive!");
+  else if (strcmp(topic, MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET) == 0) {
+    char *endptr = nullptr;
+    float val = strtof((char*)payload, &endptr);
+    Serial.print("Set humidity offset to ");
+    Serial.println(val);
+    if ((char*)payload == endptr) {
+      Serial.println("Invalid humidity offset value");
+    }
+    else if (val != sensorHumidityOffset) {
+      sensorHumidityOffset = val;
+      EEPROM.begin(EEPROM_SIZE);
+      EEPROM.put(EEPROM_HUMIDITY_OFFSET_ADDR, sensorHumidityOffset);
+      EEPROM.end();
+    }
   }
 }
 
 void loop_temp()
 {
-  float humidity = dht.readHumidity();          // in %
-  float temperature = dht.readTemperature();    // in Celsius
+  float humidity = dht.readHumidity() + sensorHumidityOffset;          // in %
+  float temperature = dht.readTemperature() + sensorTemperatureOffset; // in Celsius
 
   if (isnan(humidity) || isnan(temperature))
   {
