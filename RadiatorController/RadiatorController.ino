@@ -11,6 +11,9 @@
 //#define MQTT_TOPIC_PREFFIX      "home/kitchen"
 
 
+// Firmware version
+#define VERSION "1.0.0"
+
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
 #define PIN_DHT22_DATA        3 // Serial RX (for debug only)
@@ -134,6 +137,8 @@ void setup()
     sensorHumidityOffset = 0;
   }
 
+  Serial.print("Firmware version: ");
+  Serial.println(VERSION);
   Serial.print("Temperature offset: ");
   Serial.println(sensorTemperatureOffset);
   Serial.print("Humidity offset: ");
