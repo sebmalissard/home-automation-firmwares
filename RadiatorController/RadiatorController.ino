@@ -28,11 +28,11 @@
 #define CTRL_DISABLE  HIGH
 
 // MQTT
-#define MQTT_TOPIC_RAD_SENSOR   MQTT_TOPIC_PREFFIX"/radiator/sensor"
-#define MQTT_TOPIC_RAD_SETPOINT MQTT_TOPIC_PREFFIX"/radiator/setpoint" //replace by switch
-#define MQTT_MSG_BUFFER_SIZE    (50)
+#define MQTT_TOPIC_RAD_SENSOR                   MQTT_TOPIC_PREFFIX"/radiator/sensor"
+#define MQTT_TOPIC_RAD_SWITCH                   MQTT_TOPIC_PREFFIX"/radiator/switch"
 #define MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET   MQTT_TOPIC_PREFFIX"/radiator/set_temperature_offset"
 #define MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET      MQTT_TOPIC_PREFFIX"/radiator/set_humidity_offset"
+#define MQTT_MSG_BUFFER_SIZE                    (50)
 
 // DHT22
 #define DHT_PIN   PIN_DHT22_DATA
@@ -86,7 +86,7 @@ void mqtt_reconnect()
     if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD))
     {
       Serial.println("connected");
-      client.subscribe(MQTT_TOPIC_RAD_SETPOINT);
+      client.subscribe(MQTT_TOPIC_RAD_SWITCH);
       client.subscribe(MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET);
       client.subscribe(MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET);
     }
@@ -161,7 +161,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
   }
   Serial.println();
 
-  if (strcmp(topic, MQTT_TOPIC_RAD_SETPOINT) == 0) {
+  if (strcmp(topic, MQTT_TOPIC_RAD_SWITCH) == 0) {
     if (strncmp((char*) payload, "ON", MIN(len, 2)) == 0)
     {
       Serial.println("Set radiator ON");
