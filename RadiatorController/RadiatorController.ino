@@ -9,10 +9,11 @@
 // Uncomment mqtt topic to use
 #define MQTT_TOPIC_PREFFIX      "home/room1"
 //#define MQTT_TOPIC_PREFFIX      "home/kitchen"
+//#define MQTT_TOPIC_PREFFIX      "home/bathroom"
 
 
 // Firmware version
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -143,6 +144,9 @@ void setup()
   Serial.println(sensorTemperatureOffset);
   Serial.print("Humidity offset: ");
   Serial.println(sensorHumidityOffset);
+
+  Serial.print("Mqtt topic prefix: ");
+  Serial.println(MQTT_TOPIC_PREFFIX);
 
   delay(1000);
 
