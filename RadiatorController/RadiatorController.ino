@@ -13,7 +13,7 @@
 
 
 // Firmware version
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -222,8 +222,8 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
 
 void loop_temp()
 {
-  float humidity = dht.readHumidity() + sensorHumidityOffset;          // in %
-  float temperature = dht.readTemperature() + sensorTemperatureOffset; // in Celsius
+  float humidity = dht.readHumidity();       // in %
+  float temperature = dht.readTemperature(); // in Celsius
 
   if (isnan(humidity) || isnan(temperature))
   {
@@ -236,6 +236,9 @@ void loop_temp()
     Serial.println("Ignore zero value read from dht22 sensor");
     return;
   }
+
+  humidity += sensorHumidityOffset;
+  temperature += sensorTemperatureOffset;
 
   snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"temperature\":%.1f,\"humidity\":%.1f}", temperature, humidity);
 
