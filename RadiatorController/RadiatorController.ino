@@ -6,14 +6,12 @@
 #include "Credentials.h"
 
 // CONFIG SELECTION
-// Uncomment mqtt topic to use
-#define MQTT_TOPIC_PREFFIX      "home/room1"
-//#define MQTT_TOPIC_PREFFIX      "home/kitchen"
-//#define MQTT_TOPIC_PREFFIX      "home/bathroom"
-
+#define ROOM_NAME  "room1"
+//#define ROOM_NAME  "kitchen"
+//#define ROOM_NAME  "bathroom"
 
 // Firmware version
-#define VERSION "1.0.2"
+#define VERSION "1.0.3"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -32,6 +30,7 @@
 #define CTRL_DISABLE  HIGH
 
 // MQTT
+#define MQTT_TOPIC_PREFFIX                      "home/" ROOM_NAME
 #define MQTT_TOPIC_RAD_SENSOR                   MQTT_TOPIC_PREFFIX"/radiator/sensor"
 #define MQTT_TOPIC_RAD_SWITCH                   MQTT_TOPIC_PREFFIX"/radiator/switch"
 #define MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET   MQTT_TOPIC_PREFFIX"/radiator/set_temperature_offset"
@@ -41,6 +40,9 @@
 // DHT22
 #define DHT_PIN   PIN_DHT22_DATA
 #define DHT_TYPE  DHT22
+
+// Wifi
+#define WIFI_HOSTNAME ROOM_NAME"-radiator"
 
 
 WiFiClient espClient;
@@ -59,6 +61,7 @@ void setup_wifi()
   Serial.println(WIFI_SSID);
 
   WiFi.mode(WIFI_STA);
+  WiFi.hostname(WIFI_HOSTNAME);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED)
