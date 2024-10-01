@@ -10,18 +10,19 @@
 //#define ROOM_NAME  "kitchen"
 //#define ROOM_NAME  "bathroom"
 
+// NVM CONFIG
+// Uncomment to write NVM config
+//#define WRITE_NVM_CONFIG
+//#define SERIAL_NUMBER 1
+
 // Firmware version
-#define VERSION "1.0.3"
+#define VERSION "1.1.0"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
 #define PIN_DHT22_DATA        3 // Serial RX (for debug only)
 #define PIN_RADIATOR_CTRL_NEG 2 // Builtin LED
 #define PIN_RADIATOR_CTRL_POS 0
-
-#define EEPROM_TEMPERATURE_OFFSET_ADDR  0x00  // size 4 bytes
-#define EEPROM_HUMIDITY_OFFSET_ADDR     0x04  // size 4 bytes
-#define EEPROM_SIZE                     (8)
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -31,8 +32,12 @@
 
 // MQTT
 #define MQTT_TOPIC_PREFFIX                      "home/" ROOM_NAME
+#define MQTT_TOPIC_RAD_FIRMWARE_VERSION         MQTT_TOPIC_PREFFIX"/radiator/firmware_version"
+#define MQTT_TOPIC_RAD_SERIAL_NUMBER            MQTT_TOPIC_PREFFIX"/radiator/serial_number"
 #define MQTT_TOPIC_RAD_SENSOR                   MQTT_TOPIC_PREFFIX"/radiator/sensor"
-#define MQTT_TOPIC_RAD_SWITCH                   MQTT_TOPIC_PREFFIX"/radiator/switch"
+#define MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION     MQTT_TOPIC_PREFFIX"/radiator/get_firmware_version"
+#define MQTT_TOPIC_RAD_GET_SERIAL_NUMBER        MQTT_TOPIC_PREFFIX"/radiator/get_serial_number"
+#define MQTT_TOPIC_RAD_SET_SWITCH               MQTT_TOPIC_PREFFIX"/radiator/switch" // Todo need to rename topic with 'set'
 #define MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET   MQTT_TOPIC_PREFFIX"/radiator/set_temperature_offset"
 #define MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET      MQTT_TOPIC_PREFFIX"/radiator/set_humidity_offset"
 #define MQTT_MSG_BUFFER_SIZE                    (50)
@@ -44,13 +49,31 @@
 // Wifi
 #define WIFI_HOSTNAME ROOM_NAME"-radiator"
 
+#pragma pack(1)
+struct NVMConfig {
+  float     sensorTemperatureOffset;
+  float     sensorHumidityOffset;
+  uint32_t  deviceSerialNumber;
+};
+static_assert(sizeof(struct NVMConfig) == 12, "EEPROM config structure size is incorrect");
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 char mqttMsg[MQTT_MSG_BUFFER_SIZE];
-float sensorTemperatureOffset = 0;
-float sensorHumidityOffset = 0;
+struct NVMConfig config = {};
+
+#ifdef WRITE_NVM_CONFIG
+void write_nvm_config() {
+  Serial.println("WRITE NVM CONFIG:");
+  Serial.print(" - SERIAL_NUMBER: ");
+  Serial.println(SERIAL_NUMBER);
+
+  EEPROM.begin(sizeof(NVMConfig));
+  EEPROM.put(offsetof(NVMConfig, deviceSerialNumber), SERIAL_NUMBER);
+  EEPROM.end();
+}
+#endif
 
 void setup_wifi()
 {
@@ -93,7 +116,9 @@ void mqtt_reconnect()
     if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD))
     {
       Serial.println("connected");
-      client.subscribe(MQTT_TOPIC_RAD_SWITCH);
+      client.subscribe(MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION);
+      client.subscribe(MQTT_TOPIC_RAD_GET_SERIAL_NUMBER);
+      client.subscribe(MQTT_TOPIC_RAD_SET_SWITCH);
       client.subscribe(MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET);
       client.subscribe(MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET);
     }
@@ -123,30 +148,35 @@ void setup_dht()
 void setup()
 { 
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
+
+#ifdef WRITE_NVM_CONFIG
+  write_nvm_config();
+#endif
+  EEPROM.begin(sizeof(NVMConfig));
+  EEPROM.get(0x00, config);
+  EEPROM.end();
+
   setup_wifi();
   randomSeed(micros());
   setup_mqtt();
   setup_dht();
 
-  EEPROM.begin(EEPROM_SIZE);
-  EEPROM.get(EEPROM_TEMPERATURE_OFFSET_ADDR, sensorTemperatureOffset);
-  EEPROM.get(EEPROM_HUMIDITY_OFFSET_ADDR, sensorHumidityOffset);
-  EEPROM.end();
-
-  if (isnan(sensorTemperatureOffset)) {
-    sensorTemperatureOffset = 0;
+  if (isnan(config.sensorTemperatureOffset)) {
+    config.sensorTemperatureOffset = 0;
   }
 
-  if (isnan(sensorHumidityOffset)) {
-    sensorHumidityOffset = 0;
+  if (isnan(config.sensorHumidityOffset)) {
+    config.sensorHumidityOffset = 0;
   }
 
   Serial.print("Firmware version: ");
   Serial.println(VERSION);
   Serial.print("Temperature offset: ");
-  Serial.println(sensorTemperatureOffset);
+  Serial.println(config.sensorTemperatureOffset);
   Serial.print("Humidity offset: ");
-  Serial.println(sensorHumidityOffset);
+  Serial.println(config.sensorHumidityOffset);
+  Serial.print("Serial number: ");
+  Serial.println(config.deviceSerialNumber);
 
   Serial.print("Mqtt topic prefix: ");
   Serial.println(MQTT_TOPIC_PREFFIX);
@@ -173,7 +203,19 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
   }
   Serial.println();
 
-  if (strcmp(topic, MQTT_TOPIC_RAD_SWITCH) == 0) {
+  if (strcmp(topic, MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION) == 0) {
+    snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"firmware_version\":%s}", VERSION);
+    Serial.print("Publish message: ");
+    Serial.println(mqttMsg);
+    client.publish(MQTT_TOPIC_RAD_FIRMWARE_VERSION, mqttMsg);
+  }
+  else if (strcmp(topic, MQTT_TOPIC_RAD_GET_SERIAL_NUMBER) == 0) {
+    snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"serial_number\":%d,}", config.deviceSerialNumber);
+    Serial.print("Publish message: ");
+    Serial.println(mqttMsg);
+    client.publish(MQTT_TOPIC_RAD_SERIAL_NUMBER, mqttMsg);
+  }
+  else if (strcmp(topic, MQTT_TOPIC_RAD_SET_SWITCH) == 0) {
     if (strncmp((char*) payload, "ON", MIN(len, 2)) == 0)
     {
       Serial.println("Set radiator ON");
@@ -199,10 +241,10 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
     if ((char*)payload == endptr) {
       Serial.println("Invalid temperature offset value");
     }
-    else if (val != sensorTemperatureOffset) {
-      sensorTemperatureOffset = val;
-      EEPROM.begin(EEPROM_SIZE);
-      EEPROM.put(EEPROM_TEMPERATURE_OFFSET_ADDR, sensorTemperatureOffset);
+    else if (val != config.sensorTemperatureOffset) {
+      config.sensorTemperatureOffset = val;
+      EEPROM.begin(sizeof(NVMConfig));
+      EEPROM.put(offsetof(NVMConfig, sensorTemperatureOffset), config.sensorTemperatureOffset);
       EEPROM.end();
     }
   }
@@ -214,10 +256,10 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
     if ((char*)payload == endptr) {
       Serial.println("Invalid humidity offset value");
     }
-    else if (val != sensorHumidityOffset) {
-      sensorHumidityOffset = val;
-      EEPROM.begin(EEPROM_SIZE);
-      EEPROM.put(EEPROM_HUMIDITY_OFFSET_ADDR, sensorHumidityOffset);
+    else if (val != config.sensorHumidityOffset) {
+      config.sensorHumidityOffset = val;
+      EEPROM.begin(sizeof(NVMConfig));
+      EEPROM.put(offsetof(NVMConfig, sensorHumidityOffset), config.sensorHumidityOffset);
       EEPROM.end();
     }
   }
@@ -240,8 +282,8 @@ void loop_temp()
     return;
   }
 
-  humidity += sensorHumidityOffset;
-  temperature += sensorTemperatureOffset;
+  humidity += config.sensorHumidityOffset;
+  temperature += config.sensorTemperatureOffset;
 
   snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"temperature\":%.1f,\"humidity\":%.1f}", temperature, humidity);
 
