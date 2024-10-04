@@ -4,6 +4,7 @@
 #include <DHT.h>
 
 #include "Credentials.h"
+#include "RadiatorMqtt.h"
 
 // NVM CONFIG
 // Uncomment to write NVM config
@@ -15,7 +16,7 @@
 //#define ROOM_NAME  "bathroom"
 
 // Firmware version
-#define VERSION "1.2.0"
+#define VERSION "2.0.0"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -29,24 +30,21 @@
 #define CTRL_ENABLE   LOW
 #define CTRL_DISABLE  HIGH
 
-// MQTT
-#define MQTT_TOPIC_PREFIX                       "home/%s"  // %s replaced by ROOM_NAME
-#define MQTT_TOPIC_RAD_FIRMWARE_VERSION         "/radiator/firmware_version"
-#define MQTT_TOPIC_RAD_SERIAL_NUMBER            "/radiator/serial_number"
-#define MQTT_TOPIC_RAD_SENSOR                   "/radiator/sensor"
-#define MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION     "/radiator/get_firmware_version"
-#define MQTT_TOPIC_RAD_GET_SERIAL_NUMBER        "/radiator/get_serial_number"
-#define MQTT_TOPIC_RAD_SET_SWITCH               "/radiator/switch" // Todo need to rename topic with 'set'
-#define MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET   "/radiator/set_temperature_offset"
-#define MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET      "/radiator/set_humidity_offset"
-#define MQTT_MSG_BUFFER_SIZE                    (50)
-
 // DHT22
 #define DHT_PIN   PIN_DHT22_DATA
 #define DHT_TYPE  DHT22
 
 // Wifi
 #define WIFI_HOSTNAME "%s-radiator" // %s replaced by ROOM_NAME
+
+enum PilotWireState {
+  PILOT_WIRE_STATE_COMFORT,
+  PILOT_WIRE_STATE_ECO,
+  PILOT_WIRE_STATE_FROST_PROTECTION,
+  PILOT_WIRE_STATE_OFF,
+  PILOT_WIRE_STATE_COMFORT_MINUS_1,
+  PILOT_WIRE_STATE_COMFORT_MINUS_2,
+};
 
 #pragma pack(1)
 struct NVMConfig {
@@ -59,10 +57,13 @@ static_assert(sizeof(struct NVMConfig) == 4+4+4+32, "EEPROM config structure siz
 
 WiFiClient espClient;
 PubSubClient client(espClient);
+RadiatorMqtt mqtt(client);
 DHT dht(DHT_PIN, DHT_TYPE);
 char mqttMsg[MQTT_MSG_BUFFER_SIZE];
 struct NVMConfig config = {};
-String mqttTopicPrefix = "";
+enum Power currentPower = POWER_OFF;
+enum Mode currentMode = MODE_UNKNOWN;
+enum PresetMode currentPresetMode = PRESET_MODE_UNKNOWN;
 
 #ifdef WRITE_NVM_CONFIG
 void write_nvm_config() {
@@ -86,8 +87,7 @@ void write_nvm_config() {
 }
 #endif
 
-void setup_wifi()
-{
+void setup_wifi() {
   delay(10);
 
   Serial.println();
@@ -101,8 +101,7 @@ void setup_wifi()
   WiFi.hostname(wifi_hostname);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
@@ -115,30 +114,31 @@ void setup_wifi()
   Serial.println(WiFi.localIP());
 }
 
-void mqtt_reconnect()
-{
+void mqtt_reconnect() {
   // Loop until we're reconnected
   while (!client.connected())
   {
     Serial.print("Attempting MQTT connection...");
 
     // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
- 
+    String clientId = "ESP8266Client-Radiator-";
+    clientId += String(config.roomName);
+    clientId += "-";
+    clientId += String(config.deviceSerialNumber);
+
     // Attempt to connect
-    if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD))
-    {
+    if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), 1, true, MQTT_PAYLOAD_OFFLINE)) {
       Serial.println("connected");
-      Serial.println((mqttTopicPrefix + MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION).c_str());
-      client.subscribe((mqttTopicPrefix + MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION).c_str());
-      client.subscribe((mqttTopicPrefix + MQTT_TOPIC_RAD_GET_SERIAL_NUMBER).c_str());
-      client.subscribe((mqttTopicPrefix + MQTT_TOPIC_RAD_SET_SWITCH).c_str());
-      client.subscribe((mqttTopicPrefix + MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET).c_str());
-      client.subscribe((mqttTopicPrefix + MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET).c_str());
+      client.subscribe(MQTT_TOPIC_HOMEASSISTANT_STATUS);
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_MODE_SET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION_GET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SERIAL_NUMBER_GET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_TEMPERATURE_OFFSET_SET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_HUMIDITY_OFFSET_SET));
     }
-    else
-    {
+    else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
@@ -148,20 +148,17 @@ void mqtt_reconnect()
   }
 }
 
-void setup_mqtt()
-{
+void setup_mqtt() {
   client.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
   client.setCallback(mqtt_callback);
   mqtt_reconnect();
 }
 
-void setup_dht()
-{
+void setup_dht() {
   dht.begin();
 }
 
-void setup()
-{ 
+void setup() {
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
 
   // For serial, don't miss any message
@@ -196,15 +193,9 @@ void setup()
   Serial.print("Room name: ");
   Serial.println(config.roomName);
 
-  char str[64] = {};
-  snprintf(str, sizeof(str)-1, MQTT_TOPIC_PREFIX, config.roomName);
-  mqttTopicPrefix = str;
-
-  Serial.print("Mqtt topic prefix: ");
-  Serial.println(mqttTopicPrefix);
-
   setup_wifi();
   randomSeed(micros());
+  mqtt.setup(config.roomName);
   setup_mqtt();
   setup_dht();
 
@@ -213,56 +204,154 @@ void setup()
   pinMode(PIN_RADIATOR_CTRL_NEG, OUTPUT);
   pinMode(PIN_RADIATOR_CTRL_POS, OUTPUT);
 
-  // OFF = Hors gel
-  digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
-  digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+  // Off by default
+  set_pilot_wire_state(PILOT_WIRE_STATE_FROST_PROTECTION);
+
+  // Set device online
+  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), MQTT_PAYLOAD_ONLINE, true);
 }
 
-void mqtt_callback(char* topic, byte* payload, unsigned int len)
+void set_pilot_wire_state(PilotWireState state) {
+  switch(state) {
+    case PILOT_WIRE_STATE_COMFORT:
+      Serial.println("--> Set radiator pilot wire state comfort");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_DISABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+      break;
+    case PILOT_WIRE_STATE_ECO:
+      Serial.println("--> Set radiator pilot wire state eco");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_ENABLE);
+      break;
+    case PILOT_WIRE_STATE_FROST_PROTECTION:
+      Serial.println("--> Set radiator pilot wire state frost protection");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
+      break;
+    case PILOT_WIRE_STATE_OFF:
+      Serial.println("--> Set radiator pilot wire state off");
+      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_DISABLE);
+      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_ENABLE);
+      break;
+    case PILOT_WIRE_STATE_COMFORT_MINUS_1:
+    case PILOT_WIRE_STATE_COMFORT_MINUS_2:
+    default:
+      Serial.println("ERROR: Radiator pilote wire state is not supported!");
+      return;
+  }
+}
+
+void set_power(enum Power power) {
+  if (power == POWER_UNKNOWN) {
+    Serial.println("ERROR: Unknown power!");
+    return;
+  }
+  currentPower = power;
+  mqtt.publishMessage(power);
+  switch (power) {
+    case POWER_OFF:
+      Serial.println("Set radiator power OFF");
+      set_pilot_wire_state(PILOT_WIRE_STATE_OFF);
+      mqtt.publishMessage(MODE_OFF);
+      break;
+    case POWER_ON:
+      Serial.println("Set radiator power ON");
+      set_mode(currentMode);
+      break;
+    default:
+      Serial.println("ERROR: power is not supported!");
+  }
+}
+
+void set_mode(enum Mode mode)
 {
+  if (mode == MODE_UNKNOWN) {
+    Serial.println("ERROR: Unknown mode!");
+    return;
+  }
+  currentMode = mode;
+  if (currentPower != POWER_ON) {
+    Serial.println("Radiator is not power on, cannot apply mode now");
+    mqtt.publishMessage(MODE_OFF);
+    return;
+  }
+  mqtt.publishMessage(mode);
+  switch (mode) {
+    case MODE_OFF:
+      Serial.println("Set radiator mode off");
+      set_pilot_wire_state(PILOT_WIRE_STATE_OFF);
+      break;
+    case MODE_HEAT:
+    case MODE_AUTO:
+      Serial.println("Set radiator mode heat/auto");
+      set_preset_mode(currentPresetMode);
+      break;
+    default:
+      Serial.println("ERROR: Radiator mode is not supported!");
+      return;
+  }
+}
+
+void set_preset_mode(enum PresetMode preset_mode) {
+  if (preset_mode == PRESET_MODE_UNKNOWN) {
+    Serial.println("ERROR: Unknown preset mode!");
+    return;
+  }
+  currentPresetMode = preset_mode;
+  mqtt.publishMessage(preset_mode);
+  if (currentPower != POWER_ON) {
+    Serial.println("Radiator is not power on, cannot apply preset mode now");
+    return;
+  }
+  if (currentMode != MODE_HEAT && currentMode != MODE_AUTO) {
+    Serial.println("Radiator is not mode heat/auto, cannot apply preset mode now");
+    return;
+  }
+  switch (preset_mode) {
+    case PRESET_MODE_COMFORT:
+      Serial.println("Set radiator preset mode comfort");
+      set_pilot_wire_state(PILOT_WIRE_STATE_COMFORT);
+      break;
+    case PRESET_MODE_ECO:
+      Serial.println("Set radiator preset mode eco");
+      set_pilot_wire_state(PILOT_WIRE_STATE_ECO);
+      break;
+    case PRESET_MODE_AWAY:
+      Serial.println("Set radiator preset mode away");
+      set_pilot_wire_state(PILOT_WIRE_STATE_FROST_PROTECTION);
+      break;
+    default:
+      Serial.println("ERROR: Radiator mode is not supported!");
+      return;
+  }
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int len) {
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
 
-  for (int i = 0; i<len; i++)
-  {
+  for (int i=0; i<len; i++) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
 
-  String topicStr(topic);
-
-  if (topicStr == mqttTopicPrefix + MQTT_TOPIC_RAD_GET_FIRMWARE_VERSION) {
-    snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"firmware_version\":%s}", VERSION);
-    Serial.print("Publish message: ");
-    Serial.println(mqttMsg);
-    client.publish((mqttTopicPrefix + MQTT_TOPIC_RAD_FIRMWARE_VERSION).c_str(), mqttMsg);
+  if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION_GET))) {
+    mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION), VERSION);
   }
-  else if (topicStr == mqttTopicPrefix + MQTT_TOPIC_RAD_GET_SERIAL_NUMBER) {
-    snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"serial_number\":%d,}", config.deviceSerialNumber);
-    Serial.print("Publish message: ");
-    Serial.println(mqttMsg);
-    client.publish((mqttTopicPrefix + MQTT_TOPIC_RAD_SERIAL_NUMBER).c_str(), mqttMsg);
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SERIAL_NUMBER_GET))) {
+    mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SERIAL_NUMBER), String(config.deviceSerialNumber).c_str());
   }
-  else if (topicStr == mqttTopicPrefix + MQTT_TOPIC_RAD_SET_SWITCH) {
-    if (strncmp((char*) payload, "ON", MIN(len, 2)) == 0)
-    {
-      Serial.println("Set radiator ON");
-      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_DISABLE);
-      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
-    }
-    else if (strncmp((char*) payload, "OFF", MIN(len, 3)) == 0)
-    {
-      Serial.println("Set radiator OFF");
-      digitalWrite(PIN_RADIATOR_CTRL_NEG, CTRL_ENABLE);
-      digitalWrite(PIN_RADIATOR_CTRL_POS, CTRL_DISABLE);
-    }
-    else
-    {
-      Serial.println("Invalid message receive!");
-    }
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET))) {
+    set_power(getPowerFromMqttPayload((char*)payload, len));
   }
-  else if (topicStr == mqttTopicPrefix + MQTT_TOPIC_RAD_SET_TEMPERATURE_OFFSET) {
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_MODE_SET))) {
+    set_mode(getModeFromMqttPayload((char*)payload, len));
+  }
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET))) {
+    set_preset_mode(getPresetModeFromMqttPayload((char*)payload, len));
+  }
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_TEMPERATURE_OFFSET_SET))) {
     char *endptr = nullptr;
     float val = strtof((char*)payload, &endptr);
     Serial.print("Set temperature offset to ");
@@ -277,7 +366,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
       EEPROM.end();
     }
   }
-  else if (topicStr == mqttTopicPrefix + MQTT_TOPIC_RAD_SET_HUMIDITY_OFFSET) {
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_HUMIDITY_OFFSET_SET))) {
     char *endptr = nullptr;
     float val = strtof((char*)payload, &endptr);
     Serial.print("Set humidity offset to ");
@@ -292,21 +381,26 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len)
       EEPROM.end();
     }
   }
+  else if (isTopicEqual(topic, MQTT_TOPIC_HOMEASSISTANT_STATUS)) {
+    if (isPayloadEqual<MQTT_PAYLOAD_ONLINE>((char*) payload, len)) {
+      Serial.println("Home Assistant is connected");
+      mqtt.publishMessage(currentPower);
+      mqtt.publishMessage(currentPower != POWER_ON ? MODE_OFF : currentMode);
+      mqtt.publishMessage(currentPresetMode);
+    }
+  }
 }
 
-void loop_temp()
-{
+void loop_temp() {
   float humidity = dht.readHumidity();       // in %
   float temperature = dht.readTemperature(); // in Celsius
 
-  if (isnan(humidity) || isnan(temperature))
-  {
+  if (isnan(humidity) || isnan(temperature)) {
     Serial.println("Fail to read temperature or humidity from dht22 sensor");
     return;
   }
 
-  if (humidity == 0 && temperature == 0)
-  {
+  if (humidity == 0 && temperature == 0) {
     Serial.println("Ignore zero value read from dht22 sensor");
     return;
   }
@@ -314,20 +408,17 @@ void loop_temp()
   humidity += config.sensorHumidityOffset;
   temperature += config.sensorTemperatureOffset;
 
-  snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "{\"temperature\":%.1f,\"humidity\":%.1f}", temperature, humidity);
-
-  Serial.print("Publish message: ");
-  Serial.println(mqttMsg);
-  client.publish((mqttTopicPrefix + MQTT_TOPIC_RAD_SENSOR).c_str(), mqttMsg);
+  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE), temperature);
+  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY), humidity);
 }
 
-void loop()
-{
+void loop() {
   static unsigned long lastTime = 0;
   unsigned long currentTime = millis();
   
   mqtt_reconnect();
   client.loop();
+
 
   if (currentTime - lastTime > 5000) {
     lastTime = currentTime;
