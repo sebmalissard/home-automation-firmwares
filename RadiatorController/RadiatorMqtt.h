@@ -1,14 +1,17 @@
 #pragma once
 
+#include <ArduinoJson.h>
 #include <PubSubClient.h>
 
-constexpr size_t MQTT_TOPIC_MAX_SIZE  = 64;
-constexpr size_t MQTT_MSG_BUFFER_SIZE = 50;
+constexpr size_t MQTT_MSG_TOPIC_MAX_SIZE  = 64;
+constexpr size_t MQTT_MSG_PAYLOAD_MAX_SIZE = 4096;
 
 /* MQTT TOPIC */
 constexpr const char* MQTT_TOPIC_RAD_PREFIX                          = "home/%s/radiator";      // %s replaced by ROOM_NAME
 // Home Assitant
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_STATUS                = "homeassistant/status";  // ["online", "offline"]
+constexpr const char* MQTT_TOPIC_HOMEASSISTANT_SWITCH_CONFIG         = "homeassistant/switch/radiator_switch_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
+constexpr const char* MQTT_TOPIC_HOMEASSISTANT_CLIMATE_CONFIG        = "homeassistant/climate/radiator_climate_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 // Home Assistant switch topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_POWER                    = "/power";                // ["OFF", "ON"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_POWER_SET                = "/power/set";            // ["OFF", "ON"]
@@ -19,7 +22,6 @@ constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE              = "/preset_
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET          = "/preset_mode/set";      // ["comfort", "eco", "away"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE       = "/sensor/temperature";   // [float]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY          = "/sensor/humidity";      // [float]
-constexpr const char* MQTT_TOPIC_RAD_SUFFIX_ATTRIBUTES               = "/attributes";           // [json: name, serial_number , sw_version]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availibility";         // ["online", "offline"]
 // Custom topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION         = "/firmware_version";
@@ -127,19 +129,32 @@ enum PresetMode getPresetModeFromMqttPayload(const char* payload, size_t size) {
 class RadiatorMqtt {
 public:
   RadiatorMqtt(PubSubClient &client) : mClient(client) {
+    client.setBufferSize(MQTT_MSG_PAYLOAD_MAX_SIZE);
   }
 
-  void setup(const char * roomName) {
-    char str[MQTT_TOPIC_MAX_SIZE] = {};
-    snprintf(str, sizeof(str)-1, MQTT_TOPIC_RAD_PREFIX, roomName);
-    mMqttTopicPrefix = str;
-    Serial.print("Mqtt topic prefix: ");
-    Serial.println(mMqttTopicPrefix);
+  void setup(const char *roomName, int serialNumber, const char* version, const char* macWifi) {
+    mRoomName = roomName;
+    mSerialNumber = serialNumber;
+    mVersion = version;
+    mMacWifi = macWifi;
+
+    mMqttTopicRadPrefix = MQTT_TOPIC_RAD_PREFIX;
+    mMqttTopicRadPrefix.replace("%s", roomName);
+    Serial.print("Mqtt topic radiator prefix: ");
+    Serial.println(mMqttTopicRadPrefix);
+
+    mMqttTopicSwitchConfig = MQTT_TOPIC_HOMEASSISTANT_SWITCH_CONFIG;
+    mMqttTopicSwitchConfig.replace("%s", roomName);
+    mMqttTopicSwitchConfig.replace("%d", String(serialNumber));
+
+    mMqttTopicClimateConfig = MQTT_TOPIC_HOMEASSISTANT_CLIMATE_CONFIG;
+    mMqttTopicClimateConfig.replace("%s", roomName);
+    mMqttTopicClimateConfig.replace("%d", String(serialNumber));
   }
 
-  const char* getRadTopic(const char* topicSuffix) {
-    static char buf[MQTT_TOPIC_MAX_SIZE] = {}; 
-    snprintf(buf, MQTT_TOPIC_MAX_SIZE-1, "%s%s", mMqttTopicPrefix.c_str(), topicSuffix);
+  char* getRadTopic(const char* topicSuffix) {
+    static char buf[MQTT_MSG_TOPIC_MAX_SIZE] = {}; 
+    snprintf(buf, MQTT_MSG_TOPIC_MAX_SIZE-1, "%s%s", mMqttTopicRadPrefix.c_str(), topicSuffix);
     return buf;
   }
 
@@ -148,12 +163,14 @@ public:
     Serial.print(topic);
     Serial.print("]: ");
     Serial.println(payload);
-    mClient.publish(topic, payload, retain);
+    if (!mClient.publish(topic, payload, retain)) {
+      Serial.println("ERROR: Fail to publish message");
+    }
   }
 
   void publishMessage(const char* topic, const float value) {
-    snprintf (mqttMsg, MQTT_MSG_BUFFER_SIZE, "%.1f", value);
-    publishMessage(topic, mqttMsg);
+    snprintf (mMsgPayload, MQTT_MSG_PAYLOAD_MAX_SIZE, "%.1f", value);
+    publishMessage(topic, mMsgPayload);
   }
 
   void publishMessage(enum Power power) {
@@ -168,8 +185,73 @@ public:
     publishMessage(getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE), getMqttPayload(preset_mode));
   }
 
+  void publishMessageSwitchConfig() {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
+    config["name"] = "Switch";
+    config["unique_id"] = "id_radiator_switch_" + mRoomName + "_" + mSerialNumber;
+    config["command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET);
+    config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER);
+    config["retain"] = true;
+    addDeviceJson(config);
+    size_t size = serializeJson(config, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(mMqttTopicSwitchConfig.c_str(), mMsgPayload, true);
+  }
+
+  void publishMessageClimateConfig() {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
+    config["name"] = "Thermostat";
+    config["unique_id"] = "id_radiator_thermostat_" + mRoomName + "_" + mSerialNumber;
+    JsonArray modes = config.createNestedArray("modes");
+    modes.add(MQTT_PAYLOAD_MODE_OFF);
+    modes.add(MQTT_PAYLOAD_MODE_HEAT);
+    modes.add(MQTT_PAYLOAD_MODE_AUTO);
+    JsonArray preset_modes = config.createNestedArray("preset_modes");
+    preset_modes.add(MQTT_PAYLOAD_PRESET_MODE_COMFORT);
+    preset_modes.add(MQTT_PAYLOAD_PRESET_MODE_ECO);
+    preset_modes.add(MQTT_PAYLOAD_PRESET_MODE_AWAY);
+    config["mode_command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_MODE_SET);
+    config["mode_state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_MODE);
+    config["preset_mode_command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET);
+    config["preset_mode_state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE);
+    config["current_temperature_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE);
+    config["current_humidity_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY);
+    config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
+    config["retain"] = true;
+    addDeviceJson(config);
+    size_t size = serializeJson(config, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(mMqttTopicClimateConfig.c_str(), mMsgPayload, true);
+  }
+
 private:
-  String mMqttTopicPrefix = "";
+  void addDeviceJson(StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> &config) {
+      JsonObject device = config.createNestedObject("device");
+      device["name"] = "Radiator " + mRoomName;
+      device["identifiers"] = "id_radiator_" + mRoomName;
+      device["model"] = "Radiator Controller";
+      device["manufacturer"] = "Seb";
+      device["sw_version"] = mVersion;
+      device["serial_number"] = mSerialNumber;
+      JsonArray connections = device.createNestedArray("connections");
+      JsonArray mac = connections.createNestedArray();
+      mac.add("mac");
+      mac.add(mMacWifi);
+  }
+
+  String mMqttTopicRadPrefix = "";
+  String mMqttTopicSwitchConfig = "";
+  String mMqttTopicClimateConfig = "";
   PubSubClient &mClient;
-  char mqttMsg[MQTT_MSG_BUFFER_SIZE] = {};
+  String mVersion = "";
+  String mRoomName = "";
+  String mMacWifi = "";
+  int mSerialNumber = 0;
+  char mMsgPayload[MQTT_MSG_PAYLOAD_MAX_SIZE] = {};
 };

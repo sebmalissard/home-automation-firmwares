@@ -16,7 +16,7 @@
 //#define ROOM_NAME  "bathroom"
 
 // Firmware version
-#define VERSION "2.0.0"
+#define VERSION "2.1.0"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -59,7 +59,6 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 RadiatorMqtt mqtt(client);
 DHT dht(DHT_PIN, DHT_TYPE);
-char mqttMsg[MQTT_MSG_BUFFER_SIZE];
 struct NVMConfig config = {};
 enum Power currentPower = POWER_OFF;
 enum Mode currentMode = MODE_UNKNOWN;
@@ -137,6 +136,10 @@ void mqtt_reconnect() {
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SERIAL_NUMBER_GET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_TEMPERATURE_OFFSET_SET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_HUMIDITY_OFFSET_SET));
+      // Set device online
+      mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), MQTT_PAYLOAD_ONLINE, true);
+      mqtt.publishMessageSwitchConfig();
+      mqtt.publishMessageClimateConfig();
     }
     else {
       Serial.print("failed, rc=");
@@ -195,7 +198,7 @@ void setup() {
 
   setup_wifi();
   randomSeed(micros());
-  mqtt.setup(config.roomName);
+  mqtt.setup(config.roomName, config.deviceSerialNumber, VERSION, WiFi.macAddress().c_str());
   setup_mqtt();
   setup_dht();
 
@@ -206,9 +209,6 @@ void setup() {
 
   // Off by default
   set_pilot_wire_state(PILOT_WIRE_STATE_FROST_PROTECTION);
-
-  // Set device online
-  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), MQTT_PAYLOAD_ONLINE, true);
 }
 
 void set_pilot_wire_state(PilotWireState state) {
