@@ -20,7 +20,7 @@
 #define ON                          1
 
 MatterColorLightbulb matterDevice;
-ezWS2812 leds(120);
+ezWS2812 leds(330);
 
 void setLedColorDebug(uint8_t red, uint8_t green, uint8_t blue) {
     if (LED_BUILTIN_ACTIVE == LOW) {
