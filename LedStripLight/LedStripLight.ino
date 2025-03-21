@@ -3,7 +3,11 @@
 #include <ezWS2812.h>
 
 // Firmware version
-#define VERSION "0.1.0"
+#define VERSION "0.2.0"
+
+// Settings
+#define LED_NUM               330
+#define MODE_LOW_BRIGHTNESS   1
 
 // Matter description
 #define DEVICE_NAME   "Bedroom Led Strip Light"
@@ -20,7 +24,10 @@
 #define ON                          1
 
 MatterColorLightbulb matterDevice;
-ezWS2812 leds(330);
+ezWS2812 leds(LED_NUM); // Use SPI MOSI D11
+
+#define MAX(a, b) (a > b ? a : b)
+#define MAX3(a, b, c) MAX(MAX(a, b), c)
 
 void setLedColorDebug(uint8_t red, uint8_t green, uint8_t blue) {
     if (LED_BUILTIN_ACTIVE == LOW) {
@@ -34,6 +41,44 @@ void setLedColorDebug(uint8_t red, uint8_t green, uint8_t blue) {
     }
 }
 
+void setLedWS2812(uint8_t r, uint8_t g, uint8_t b) {
+#if MODE_LOW_BRIGHTNESS
+  uint8_t v = MAX3(r, g, b);
+
+  noInterrupts();
+
+  if (v == 0) { // 0%
+    leds.set_pixel(LED_NUM, 0, 0, 0, 0, false); 
+  } if (v <= 25) { // <10% -> x LED 1%
+    uint16_t active_leds = v*10/25;
+    uint8_t r_low = r * 4 / v;  // v=4 -> 1%
+    uint8_t g_low = g * 4 / v;
+    uint8_t b_low = b * 4 / v;
+    for (uint16_t i=0; i<LED_NUM; i++) {
+        if (i % 10 < active_leds) {
+            leds.set_pixel(1, r_low, g_low, b_low, 100, false); // ON
+        } else {
+            leds.set_pixel(1, 0, 0, 0, 0, false); // OFF
+        }
+    }
+  } else { // >10% -> all LED x%
+      uint8_t v_scaled = 4 + ((v - 27) * (255 - 4)) / (255 - 27); // Remap [27,255] -> [4,255]
+      uint8_t r_adj = (uint16_t)r * v_scaled / v;
+      uint8_t g_adj = (uint16_t)g * v_scaled / v;
+      uint8_t b_adj = (uint16_t)b * v_scaled / v;
+      leds.set_pixel(LED_NUM, r_adj, g_adj, b_adj, 100, false); 
+  }
+  
+  leds.end_transfer();
+  interrupts();
+
+#else
+  noInterrupts();
+  leds.set_all(r, g, b);
+  interrupts();
+#endif
+}
+
 void setLedColorRGB(uint8_t red, uint8_t green, uint8_t blue) {
   static uint8_t prevRed = 255;
   static uint8_t prevGreen = 255;
@@ -43,10 +88,7 @@ void setLedColorRGB(uint8_t red, uint8_t green, uint8_t blue) {
     Serial.printf("Setting LED color to > r: %u  g: %u  b: %u\n", red, green, blue);
 
     setLedColorDebug(red, green, blue);
-
-    noInterrupts();
-    leds.set_all(red, green, blue); // Use SPI MOSI D11
-    interrupts();
+    setLedWS2812(red, green, blue);
 
     prevRed = red;
     prevGreen = green;
