@@ -9,14 +9,13 @@
 // NVM CONFIG
 // Uncomment to write NVM config
 //#define WRITE_NVM_CONFIG
-//#define SERIAL_NUMBER 1
-//#define ROOM_NAME  "room1"
+//#define SERIAL_NUMBER 2
 //#define ROOM_NAME  "bedroom"
-//#define ROOM_NAME  "kitchen"
 //#define ROOM_NAME  "bathroom"
+//#define ROOM_NAME  "kitchen"
 
 // Firmware version
-#define VERSION "2.1.0"
+#define VERSION "2.2.0"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
@@ -252,7 +251,7 @@ void set_power(enum Power power) {
     case POWER_OFF:
       Serial.println("Set radiator power OFF");
       set_pilot_wire_state(PILOT_WIRE_STATE_OFF);
-      mqtt.publishMessage(MODE_OFF);
+      mqtt.publishMessage(ACTION_OFF);
       break;
     case POWER_ON:
       Serial.println("Set radiator power ON");
@@ -270,16 +269,17 @@ void set_mode(enum Mode mode)
     return;
   }
   currentMode = mode;
+  mqtt.publishMessage(mode);
   if (currentPower != POWER_ON) {
     Serial.println("Radiator is not power on, cannot apply mode now");
-    mqtt.publishMessage(MODE_OFF);
+    mqtt.publishMessage(ACTION_OFF);
     return;
   }
-  mqtt.publishMessage(mode);
   switch (mode) {
     case MODE_OFF:
       Serial.println("Set radiator mode off");
       set_pilot_wire_state(PILOT_WIRE_STATE_OFF);
+      mqtt.publishMessage(ACTION_OFF);
       break;
     case MODE_HEAT:
     case MODE_AUTO:
@@ -307,6 +307,7 @@ void set_preset_mode(enum PresetMode preset_mode) {
     Serial.println("Radiator is not mode heat/auto, cannot apply preset mode now");
     return;
   }
+  mqtt.publishMessage(ACTION_HEATING);
   switch (preset_mode) {
     case PRESET_MODE_COMFORT:
       Serial.println("Set radiator preset mode comfort");

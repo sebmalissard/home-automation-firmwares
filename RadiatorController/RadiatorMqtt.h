@@ -23,6 +23,7 @@ constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET          = "/preset_
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE       = "/sensor/temperature";   // [float]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY          = "/sensor/humidity";      // [float]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availibility";         // ["online", "offline"]
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_ACTION                   = "/action";               // ["off", "heating", "idle"]
 // Custom topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION         = "/firmware_version";
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION_GET     = "/firmware_version/get";
@@ -66,6 +67,17 @@ enum PresetMode {
   PRESET_MODE_ECO,
   PRESET_MODE_AWAY,
 };
+// Action
+constexpr const char* MQTT_PAYLOAD_ACTION_UNKNOWN = "unknown";
+constexpr const char* MQTT_PAYLOAD_ACTION_OFF     = "off";
+constexpr const char* MQTT_PAYLOAD_ACTION_HEATING = "heating";
+constexpr const char* MQTT_PAYLOAD_ACTION_IDLE    = "idle";
+enum Action {
+  ACTION_UNKNOWN,
+  ACTION_OFF,
+  ACTION_HEATING,
+  ACTION_IDLE,
+};
 
 /* Helper */
 
@@ -101,6 +113,15 @@ const char* getMqttPayload(enum PresetMode preset_mode) {
     case PRESET_MODE_ECO: return MQTT_PAYLOAD_PRESET_MODE_ECO;
     case PRESET_MODE_AWAY: return MQTT_PAYLOAD_PRESET_MODE_AWAY;
     default: return MQTT_PAYLOAD_PRESET_MODE_UNKNOWN;
+  }
+}
+
+const char* getMqttPayload(enum Action action) {
+  switch (action) {
+    case ACTION_OFF: return MQTT_PAYLOAD_ACTION_OFF;
+    case ACTION_HEATING: return MQTT_PAYLOAD_ACTION_HEATING;
+    case ACTION_IDLE: return MQTT_PAYLOAD_ACTION_IDLE;
+    default: return MQTT_PAYLOAD_ACTION_UNKNOWN;
   }
 }
 
@@ -185,6 +206,10 @@ public:
     publishMessage(getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE), getMqttPayload(preset_mode));
   }
 
+  void publishMessage(enum Action action) {
+    publishMessage(getRadTopic(MQTT_TOPIC_RAD_SUFFIX_ACTION), getMqttPayload(action));
+  }
+
   void publishMessageSwitchConfig() {
     StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
     config["name"] = "Switch";
@@ -220,6 +245,7 @@ public:
     config["current_temperature_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE);
     config["current_humidity_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY);
     config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
+    config["action_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_ACTION);
     config["retain"] = true;
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
