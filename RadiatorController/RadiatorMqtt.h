@@ -12,6 +12,8 @@ constexpr const char* MQTT_TOPIC_HOMEASSISTANT_STATUS                = "homeassi
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_SWITCH_CONFIG         = "homeassistant/switch/radiator_switch_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_CLIMATE_CONFIG        = "homeassistant/climate/radiator_climate_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_UPDATE_CONFIG         = "homeassistant/update/radiator_climate_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
+constexpr const char* MQTT_TOPIC_HA_SENSOR_TEMPERATURE_CONFIG        = "homeassistant/sensor/radiator_temperature_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
+constexpr const char* MQTT_TOPIC_HA_SENSOR_HUMIDITY_CONFIG           = "homeassistant/sensor/radiator_humidity_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 // OTA firmware server
 constexpr const char* MQTT_TOPIC_OTA_CHECK_UPDATE                    = "home/ota/check_update";
 
@@ -25,13 +27,14 @@ constexpr const char* MQTT_TOPIC_RAD_SUFFIX_MODE                     = "/mode"; 
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_MODE_SET                 = "/mode/set";             // ["off", "heat"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE              = "/preset_mode";          // ["comfort", "eco", "away"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET          = "/preset_mode/set";      // ["comfort", "eco", "away"]
-constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE       = "/sensor/temperature";   // [float]
-constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY          = "/sensor/humidity";      // [float]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availibility";         // ["online", "offline"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_ACTION                   = "/action";               // ["off", "heating", "idle"]
 // Home Assistant update topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE             = "/update/state";         // {installed_version, in_progress }
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND           = "/update/command";
+// Home Assistant sensors topics
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE       = "/sensor/temperature";   // [float]
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY          = "/sensor/humidity";      // [float]
 // Custom topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION         = "/firmware_version";
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION_GET     = "/firmware_version/get";
@@ -186,6 +189,14 @@ public:
     mMqttTopicUpdateConfig = MQTT_TOPIC_HOMEASSISTANT_UPDATE_CONFIG;
     mMqttTopicUpdateConfig.replace("%s", roomName);
     mMqttTopicUpdateConfig.replace("%d", String(serialNumber));
+
+    mMqttTopicSensorTemperatureConfig = MQTT_TOPIC_HA_SENSOR_TEMPERATURE_CONFIG;
+    mMqttTopicSensorTemperatureConfig.replace("%s", roomName);
+    mMqttTopicSensorTemperatureConfig.replace("%d", String(serialNumber));
+
+    mMqttTopicSensorHumidityConfig = MQTT_TOPIC_HA_SENSOR_HUMIDITY_CONFIG;
+    mMqttTopicSensorHumidityConfig.replace("%s", roomName);
+    mMqttTopicSensorHumidityConfig.replace("%d", String(serialNumber));
   }
 
   char* getRadTopic(const char* topicSuffix) {
@@ -227,7 +238,7 @@ public:
 
   void publishMessageSwitchConfig() {
     StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
-    config["name"] = "Switch";
+    config["name"] = "Power Switch";
     config["unique_id"] = "id_radiator_switch_" + mRoomName + "_" + mSerialNumber;
     config["command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET);
     config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER);
@@ -290,6 +301,40 @@ public:
     publishMessage(mMqttTopicUpdateConfig.c_str(), mMsgPayload, true);
   }
 
+  void publishMessageSensorTemperatureConfig() {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
+    config["name"] = "Temperature";
+    config["unique_id"] = "id_radiator_temperature_" + mRoomName + "_" + mSerialNumber;
+    config["platform"] = "sensor";
+    config["device_class"] = "temperature";
+    config["unit_of_measurement"] = "°C";
+    config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE);
+    addDeviceJson(config);
+    size_t size = serializeJson(config, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(mMqttTopicSensorTemperatureConfig.c_str(), mMsgPayload, true);
+  }
+
+  void publishMessageSensorHumidityConfig() {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
+    config["name"] = "Humidity";
+    config["unique_id"] = "id_radiator_humidity_" + mRoomName + "_" + mSerialNumber;
+    config["platform"] = "sensor";
+    config["device_class"] = "humidity";
+    config["unit_of_measurement"] = "%";
+    config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY);
+    addDeviceJson(config);
+    size_t size = serializeJson(config, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(mMqttTopicSensorHumidityConfig.c_str(), mMsgPayload, true);
+  }
+
   void publishMessageUpdateState(const char* latest_version, bool in_progress = false) {
     StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> state;
     state["installed_version"] = mVersion;
@@ -326,6 +371,8 @@ private:
   String mMqttTopicSwitchConfig = "";
   String mMqttTopicClimateConfig = "";
   String mMqttTopicUpdateConfig = "";
+  String mMqttTopicSensorTemperatureConfig = "";
+  String mMqttTopicSensorHumidityConfig = "";
   PubSubClient &mClient;
   String mVersion = "";
   String mRoomName = "";

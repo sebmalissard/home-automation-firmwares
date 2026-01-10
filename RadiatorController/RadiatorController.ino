@@ -16,7 +16,7 @@
 //#define ROOM_NAME  "kitchen"
 
 // OTA
-#define VERSION "3.0.0"
+#define VERSION "3.1.1"
 #define DEVICE  "RadiatorController"
 
 // PINOUT
@@ -142,6 +142,8 @@ void mqtt_reconnect() {
       mqtt.publishMessageSwitchConfig();
       mqtt.publishMessageClimateConfig();
       mqtt.publishMessageUpdateConfig();
+      mqtt.publishMessageSensorTemperatureConfig();
+      mqtt.publishMessageSensorHumidityConfig();
     }
     else {
       Serial.print("failed, rc=");
