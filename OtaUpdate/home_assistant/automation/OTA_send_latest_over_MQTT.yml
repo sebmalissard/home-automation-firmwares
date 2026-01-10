@@ -1,0 +1,19 @@
+alias: OTA MQTT check update
+description: ""
+triggers:
+  - trigger: state
+    entity_id:
+      - input_button.ota_firmware_latest_send
+conditions: []
+actions:
+  - action: mqtt.publish
+    metadata: {}
+    data:
+      qos: "0"
+      topic: home/ota/check_update
+      payload: |-
+        {
+           "url": "https://192.168.99.1:8123/local/firmwares/firmwares-latest.json"
+        }
+      retain: true
+mode: single

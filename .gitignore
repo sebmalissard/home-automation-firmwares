@@ -1,1 +1,16 @@
 Credentials.h
+CMakeCache.txt
+CMakeFiles
+Makefile
+build
+cmake_install.cmake
+create_der_from_pem_key
+create_ota_image
+credentials.py*
+firmwares
+out
+private_key.pem
+pyscript
+.vscode
+__pycache__
+*.zip
