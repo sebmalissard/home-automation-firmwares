@@ -5,6 +5,7 @@
 
 #include "Credentials.h"
 #include "RadiatorMqtt.h"
+#include "OtaUpdater.h"
 
 // NVM CONFIG
 // Uncomment to write NVM config
@@ -14,17 +15,15 @@
 //#define ROOM_NAME  "bathroom"
 //#define ROOM_NAME  "kitchen"
 
-// Firmware version
-#define VERSION "2.2.0"
+// OTA
+#define VERSION "3.0.0"
+#define DEVICE  "RadiatorController"
 
 // PINOUT
 #define PIN_SERIAL_TX_DEBUG   1
 #define PIN_DHT22_DATA        3 // Serial RX (for debug only)
 #define PIN_RADIATOR_CTRL_NEG 2 // Builtin LED
 #define PIN_RADIATOR_CTRL_POS 0
-
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MAX(a,b) (((a)>(b))?(a):(b))
 
 #define CTRL_ENABLE   LOW
 #define CTRL_DISABLE  HIGH
@@ -54,10 +53,11 @@ struct NVMConfig {
 };
 static_assert(sizeof(struct NVMConfig) == 4+4+4+32, "EEPROM config structure size is incorrect");
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
 RadiatorMqtt mqtt(client);
 DHT dht(DHT_PIN, DHT_TYPE);
+OtaUpdater ota(DEVICE, VERSION);
 struct NVMConfig config = {};
 enum Power currentPower = POWER_OFF;
 enum Mode currentMode = MODE_UNKNOWN;
@@ -128,6 +128,7 @@ void mqtt_reconnect() {
     if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), 1, true, MQTT_PAYLOAD_OFFLINE)) {
       Serial.println("connected");
       client.subscribe(MQTT_TOPIC_HOMEASSISTANT_STATUS);
+      client.subscribe(MQTT_TOPIC_OTA_CHECK_UPDATE);
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_MODE_SET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET));
@@ -135,10 +136,12 @@ void mqtt_reconnect() {
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SERIAL_NUMBER_GET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_TEMPERATURE_OFFSET_SET));
       client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_HUMIDITY_OFFSET_SET));
+      client.subscribe(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND));
       // Set device online
       mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY), MQTT_PAYLOAD_ONLINE, true);
       mqtt.publishMessageSwitchConfig();
       mqtt.publishMessageClimateConfig();
+      mqtt.publishMessageUpdateConfig();
     }
     else {
       Serial.print("failed, rc=");
@@ -388,6 +391,36 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
       mqtt.publishMessage(currentPower);
       mqtt.publishMessage(currentPower != POWER_ON ? MODE_OFF : currentMode);
       mqtt.publishMessage(currentPresetMode);
+    }
+  }
+  else if (isTopicEqual(topic, MQTT_TOPIC_OTA_CHECK_UPDATE)) {
+    Serial.println("Check OTA update requested");
+    StaticJsonDocument<256> json;
+    DeserializationError error = deserializeJson(json, payload, len);
+    if (error) {
+      Serial.print("OTA check update JSON error: ");
+      Serial.println(error.f_str());
+    } else {
+      const char* url = json["url"];
+      if (ota.checkUpdate(url) < 0) {
+        // Error occur, set no update
+        mqtt.publishMessageUpdateState(VERSION);
+      }
+      else {
+        mqtt.publishMessageUpdateState(ota.getExpectedVersion().c_str());
+      }
+    }
+  }
+  else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND))) {
+    Serial.println("OTA update command received");
+    if (len == 7 && strncmp((char*)payload, "INSTALL", len) == 0) {
+      Serial.println("Install command valid do update");
+      mqtt.deleteMessageUpdateCommand();
+      if (ota.getExpectedVersion() != VERSION) {
+        mqtt.publishMessageUpdateState(ota.getExpectedVersion().c_str(), true);
+        ota.doUpdate();
+        mqtt.publishMessageUpdateState(ota.getExpectedVersion().c_str(), false);
+      }
     }
   }
 }

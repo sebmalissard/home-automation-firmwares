@@ -6,12 +6,17 @@
 constexpr size_t MQTT_MSG_TOPIC_MAX_SIZE  = 64;
 constexpr size_t MQTT_MSG_PAYLOAD_MAX_SIZE = 4096;
 
-/* MQTT TOPIC */
-constexpr const char* MQTT_TOPIC_RAD_PREFIX                          = "home/%s/radiator";      // %s replaced by ROOM_NAME
+/* EXTERNAL MQTT TOPIC */
 // Home Assitant
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_STATUS                = "homeassistant/status";  // ["online", "offline"]
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_SWITCH_CONFIG         = "homeassistant/switch/radiator_switch_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_CLIMATE_CONFIG        = "homeassistant/climate/radiator_climate_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
+constexpr const char* MQTT_TOPIC_HOMEASSISTANT_UPDATE_CONFIG         = "homeassistant/update/radiator_climate_%s_%d/config"; // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
+// OTA firmware server
+constexpr const char* MQTT_TOPIC_OTA_CHECK_UPDATE                    = "home/ota/check_update";
+
+/* RAD MQTT TOPIC */
+constexpr const char* MQTT_TOPIC_RAD_PREFIX                          = "home/%s/radiator";      // %s replaced by ROOM_NAME
 // Home Assistant switch topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_POWER                    = "/power";                // ["OFF", "ON"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_POWER_SET                = "/power/set";            // ["OFF", "ON"]
@@ -24,6 +29,9 @@ constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE       = "/sensor/
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY          = "/sensor/humidity";      // [float]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availibility";         // ["online", "offline"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_ACTION                   = "/action";               // ["off", "heating", "idle"]
+// Home Assistant update topics
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE             = "/update/state";         // {installed_version, in_progress }
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND           = "/update/command";
 // Custom topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION         = "/firmware_version";
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_FIRMWARE_VERSION_GET     = "/firmware_version/get";
@@ -78,6 +86,9 @@ enum Action {
   ACTION_HEATING,
   ACTION_IDLE,
 };
+// Entity category
+constexpr const char* MQTT_PAYLOAD_CATEGORY_CONFIG = "config";
+constexpr const char* MQTT_PAYLOAD_CATEGORY_DIAGNOSTIC = "diagnostic";
 
 /* Helper */
 
@@ -171,6 +182,10 @@ public:
     mMqttTopicClimateConfig = MQTT_TOPIC_HOMEASSISTANT_CLIMATE_CONFIG;
     mMqttTopicClimateConfig.replace("%s", roomName);
     mMqttTopicClimateConfig.replace("%d", String(serialNumber));
+
+    mMqttTopicUpdateConfig = MQTT_TOPIC_HOMEASSISTANT_UPDATE_CONFIG;
+    mMqttTopicUpdateConfig.replace("%s", roomName);
+    mMqttTopicUpdateConfig.replace("%d", String(serialNumber));
   }
 
   char* getRadTopic(const char* topicSuffix) {
@@ -256,11 +271,47 @@ public:
     publishMessage(mMqttTopicClimateConfig.c_str(), mMsgPayload, true);
   }
 
+  void publishMessageUpdateConfig() {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> config;
+    config["name"] = "Firmware";
+    config["unique_id"] = "id_radiator_update_" + mRoomName + "_" + mSerialNumber;
+    config["platform"] = "update";
+    config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE);
+    config["command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND);
+    config["entity_category"] = MQTT_PAYLOAD_CATEGORY_DIAGNOSTIC;
+    config["retain"] = true;
+    config["payload_install"] = "INSTALL";
+    addDeviceJson(config);
+    size_t size = serializeJson(config, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(mMqttTopicUpdateConfig.c_str(), mMsgPayload, true);
+  }
+
+  void publishMessageUpdateState(const char* latest_version, bool in_progress = false) {
+    StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> state;
+    state["installed_version"] = mVersion;
+    state["latest_version"] = latest_version;
+    state["in_progress"] = in_progress;
+    size_t size = serializeJson(state, mMsgPayload);
+    if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
+      Serial.print("ERROR: Buffer payload is too small, need: ");
+      Serial.println(size);
+    }
+    publishMessage(getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE), mMsgPayload, true);
+  }
+
+  void deleteMessageUpdateCommand() {
+    publishMessage(getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND), "", true);
+  }
+
 private:
   void addDeviceJson(StaticJsonDocument<MQTT_MSG_PAYLOAD_MAX_SIZE> &config) {
       JsonObject device = config.createNestedObject("device");
       device["name"] = "Radiator " + mRoomName;
-      device["identifiers"] = "id_radiator_" + mRoomName;
+      device["identifiers"] = "id_radiator_" + mRoomName + "_" + mSerialNumber;
       device["model"] = "Radiator Controller";
       device["manufacturer"] = "Seb";
       device["sw_version"] = mVersion;
@@ -274,6 +325,7 @@ private:
   String mMqttTopicRadPrefix = "";
   String mMqttTopicSwitchConfig = "";
   String mMqttTopicClimateConfig = "";
+  String mMqttTopicUpdateConfig = "";
   PubSubClient &mClient;
   String mVersion = "";
   String mRoomName = "";
