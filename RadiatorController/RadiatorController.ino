@@ -10,13 +10,15 @@
 // NVM CONFIG
 // Uncomment to write NVM config
 //#define WRITE_NVM_CONFIG
-//#define SERIAL_NUMBER 2
-//#define ROOM_NAME  "bedroom"
-//#define ROOM_NAME  "bathroom"
-//#define ROOM_NAME  "kitchen"
+//#define SERIAL_NUMBER 5
+//#define ROOM_NAME  "bedroom"    // 1
+//#define ROOM_NAME  "bathroom"   // 2
+//#define ROOM_NAME  "kitchen"    // 3
+//#define ROOM_NAME  "livingroom" // 4
+//#define ROOM_NAME  "office"     // 5
 
 // OTA
-#define VERSION "3.1.1"
+#define VERSION "3.2.0"
 #define DEVICE  "RadiatorController"
 
 // PINOUT

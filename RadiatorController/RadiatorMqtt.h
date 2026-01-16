@@ -27,7 +27,7 @@ constexpr const char* MQTT_TOPIC_RAD_SUFFIX_MODE                     = "/mode"; 
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_MODE_SET                 = "/mode/set";             // ["off", "heat"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE              = "/preset_mode";          // ["comfort", "eco", "away"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_PRESET_MODE_SET          = "/preset_mode/set";      // ["comfort", "eco", "away"]
-constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availibility";         // ["online", "offline"]
+constexpr const char* MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY             = "/availability";         // ["online", "offline"]
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_ACTION                   = "/action";               // ["off", "heating", "idle"]
 // Home Assistant update topics
 constexpr const char* MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE             = "/update/state";         // {installed_version, in_progress }
@@ -242,6 +242,7 @@ public:
     config["unique_id"] = "id_radiator_switch_" + mRoomName + "_" + mSerialNumber;
     config["command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER_SET);
     config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_POWER);
+    config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
     config["retain"] = true;
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
@@ -289,6 +290,7 @@ public:
     config["platform"] = "update";
     config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_STATE);
     config["command_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_UPDATE_COMMAND);
+    config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
     config["entity_category"] = MQTT_PAYLOAD_CATEGORY_DIAGNOSTIC;
     config["retain"] = true;
     config["payload_install"] = "INSTALL";
@@ -309,6 +311,7 @@ public:
     config["device_class"] = "temperature";
     config["unit_of_measurement"] = "°C";
     config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE);
+    config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
@@ -326,6 +329,7 @@ public:
     config["device_class"] = "humidity";
     config["unit_of_measurement"] = "%";
     config["state_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY);
+    config["availability_topic"] = getRadTopic(MQTT_TOPIC_RAD_SUFFIX_AVAILABILITY);
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
