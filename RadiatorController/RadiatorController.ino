@@ -10,15 +10,16 @@
 // NVM CONFIG
 // Uncomment to write NVM config
 //#define WRITE_NVM_CONFIG
-//#define SERIAL_NUMBER 5
+//#define SERIAL_NUMBER 99
 //#define ROOM_NAME  "bedroom"    // 1
 //#define ROOM_NAME  "bathroom"   // 2
 //#define ROOM_NAME  "kitchen"    // 3
 //#define ROOM_NAME  "livingroom" // 4
 //#define ROOM_NAME  "office"     // 5
+//#define ROOM_NAME  "test"       // 99
 
 // OTA
-#define VERSION "3.2.0"
+#define VERSION "3.3.1"
 #define DEVICE  "RadiatorController"
 
 // PINOUT
@@ -31,8 +32,10 @@
 #define CTRL_DISABLE  HIGH
 
 // DHT22
-#define DHT_PIN   PIN_DHT22_DATA
-#define DHT_TYPE  DHT22
+#define DHT_PIN     PIN_DHT22_DATA
+#define DHT_TYPE    DHT22
+#define DHT_TAB_MAX 24 // 5*24 = 120s
+#define DHT_VAL_MIN 3
 
 // Wifi
 #define WIFI_HOSTNAME "%s-radiator" // %s replaced by ROOM_NAME
@@ -361,9 +364,12 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
   }
   else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_TEMPERATURE_OFFSET_SET))) {
     char *endptr = nullptr;
-    float val = strtof((char*)payload, &endptr);
-    Serial.print("Set temperature offset to ");
-    Serial.println(val);
+    char val_str[len+1];
+    float val;
+    memcpy(val_str, payload, len);
+    val_str[len] = '\0';
+    val = strtof((char*)payload, &endptr);
+    Serial.printf("Set temperature offset to %f\n", val);
     if ((char*)payload == endptr) {
       Serial.println("Invalid temperature offset value");
     }
@@ -376,10 +382,13 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
   }
   else if (isTopicEqual(topic, mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_HUMIDITY_OFFSET_SET))) {
     char *endptr = nullptr;
-    float val = strtof((char*)payload, &endptr);
-    Serial.print("Set humidity offset to ");
-    Serial.println(val);
-    if ((char*)payload == endptr) {
+    char val_str[len+1];
+    float val;
+    memcpy(val_str, payload, len);
+    val_str[len] = '\0';
+    val = strtof(val_str, &endptr);
+    Serial.printf("Set humidity offset to %f\n", val);
+    if ((char*)val_str == endptr) {
       Serial.println("Invalid humidity offset value");
     }
     else if (val != config.sensorHumidityOffset) {
@@ -429,25 +438,51 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
   }
 }
 
+int32_t computeAverage(int16_t val[DHT_TAB_MAX]) {
+  int64_t res = 0;
+  int valid = 0;
+  int i;
+  for (i=0; i<DHT_TAB_MAX; i++) {
+    if (val[i]) {
+      res += val[i];
+      valid++;
+    }
+  }
+  if (valid < DHT_VAL_MIN) {
+    return 0;
+  }
+  return res/valid;
+}
+
 void loop_temp() {
+  static int16_t temperatureTab[DHT_TAB_MAX] = {};
+  static int16_t humidityTab[DHT_TAB_MAX] = {};
+  static int i = 0;
   float humidity = dht.readHumidity();       // in %
   float temperature = dht.readTemperature(); // in Celsius
 
-  if (isnan(humidity) || isnan(temperature)) {
+  if (isnan(humidity) || isnan(temperature) || (humidity == 0 && temperature == 0)) {
     Serial.println("Fail to read temperature or humidity from dht22 sensor");
-    return;
+    humidityTab[i] = 0;
+    temperatureTab[i] = 0;
+  } else {
+    humidity += config.sensorHumidityOffset;
+    temperature += config.sensorTemperatureOffset;
+    humidityTab[i] = humidity * 100;
+    temperatureTab[i] = temperature * 100.;
   }
 
-  if (humidity == 0 && temperature == 0) {
-    Serial.println("Ignore zero value read from dht22 sensor");
-    return;
+  i = (i + 1) % DHT_TAB_MAX;
+
+  humidity = computeAverage(humidityTab) / 100.;
+  temperature = computeAverage(temperatureTab) / 100.;
+
+  if (temperature > 0 && temperature < 80 & humidity > 0 && humidity < 100) {
+    mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY), humidity);
+    mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE), temperature);
+  } else {
+    Serial.printf("Invalid value: temperature=%f, humidity=%f\n", temperature, humidity);
   }
-
-  humidity += config.sensorHumidityOffset;
-  temperature += config.sensorTemperatureOffset;
-
-  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_TEMPERATURE), temperature);
-  mqtt.publishMessage(mqtt.getRadTopic(MQTT_TOPIC_RAD_SUFFIX_SENSOR_HUMIDITY), humidity);
 }
 
 void loop() {

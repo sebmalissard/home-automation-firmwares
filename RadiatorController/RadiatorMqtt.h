@@ -216,7 +216,7 @@ public:
   }
 
   void publishMessage(const char* topic, const float value) {
-    snprintf (mMsgPayload, MQTT_MSG_PAYLOAD_MAX_SIZE, "%.1f", value);
+    snprintf (mMsgPayload, MQTT_MSG_PAYLOAD_MAX_SIZE, "%.2f", value);
     publishMessage(topic, mMsgPayload);
   }
 
