@@ -6,9 +6,10 @@
 #include "Credentials.h"
 #include "LedMqtt.h"
 #include "OtaUpdater.h"
+#include "Logger.h"
 
 // OTA
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 #define DEVICE  "LedStripLight2"
 
 // Settings (TODO later move in NVM config)
@@ -55,9 +56,7 @@ uint16_t sunriseCurrentLedsInLevel = 0;
 void setup_wifi() {
   delay(10);
 
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(WIFI_SSID);
+  Log.info("Connecting to %s", WIFI_SSID);
 
   char wifi_hostname[64] = {};
   snprintf(wifi_hostname, sizeof(wifi_hostname)-1, WIFI_HOSTNAME, config.roomName, config.deviceSerialNumber);
@@ -68,15 +67,12 @@ void setup_wifi() {
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    Log.debug(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi connecté");
-  Serial.print("MAC : ");
-  Serial.println(WiFi.macAddress());
-  Serial.print("Adresse IP : ");
-  Serial.println(WiFi.localIP());
+  Log.info("WiFi connecté");
+  Log.info("MAC: %s", WiFi.macAddress());
+  Log.info("Adresse IP: %s", WiFi.localIP());
 }
 
 void setup_mqtt() {
@@ -89,7 +85,7 @@ void mqtt_reconnect() {
   // Loop until we're reconnected
   while (!client.connected())
   {
-    Serial.print("Attempting MQTT connection...");
+    Log.info("Attempting MQTT connection...");
 
     // Create a random client ID
     String clientId = "ESP8266Client-LedStrip-";
@@ -99,13 +95,14 @@ void mqtt_reconnect() {
 
     // Attempt to connect
     if (client.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD, mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_AVAILABILITY), 1, true, MQTT_PAYLOAD_OFFLINE)) {
-      Serial.println("connected");
+      Log.info("connected");
       client.subscribe(MQTT_TOPIC_HOMEASSISTANT_STATUS);
       client.subscribe(MQTT_TOPIC_OTA_CHECK_UPDATE);
       client.subscribe(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_SUNRISE_SET));
       client.subscribe(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_STATE_SET));
       client.subscribe(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_RGB_SET));
       client.subscribe(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_UPDATE_COMMAND));
+      client.subscribe(Log.getMqttTopicLevel());
       // Set device online
       mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_AVAILABILITY), MQTT_PAYLOAD_ONLINE, true);
       mqtt.publishMessageSwitchSuriseConfig();
@@ -114,9 +111,7 @@ void mqtt_reconnect() {
       mqtt.publishMessageSensorRssiConfig();
     }
     else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
+      Log.warning("failed, rc=%d try again in 5 seconds", client.state());
       // Wait 5 seconds before retrying
       delay(5000);
     }
@@ -137,10 +132,12 @@ void setup() {
   EEPROM.get(0x00, config);
   EEPROM.end();
 
+  Log.setup(&client, config.roomName, "led");
+
   // Device info
-  Serial.printf("Firmware version: %s\n", VERSION);
-  Serial.printf("Serial number: %d\n", config.deviceSerialNumber);
-  Serial.printf("Room name: %s\n", config.roomName);
+  Log.info("Firmware version: %s\n", VERSION);
+  Log.info("Serial number: %d\n", config.deviceSerialNumber);
+  Log.info("Room name: %s\n", config.roomName);
 
   setup_wifi();
   randomSeed(micros());
@@ -170,7 +167,7 @@ void setLedColorRGB(uint8_t red, uint8_t green, uint8_t blue) {
   static uint8_t prevBlue = 0;
 
   if (prevRed != red || prevGreen != green || prevBlue != blue) {
-    Serial.printf("Setting LED color to > r: %u  g: %u  b: %u\n", red, green, blue);
+    Log.info("Setting LED color to > r: %u  g: %u  b: %u\n", red, green, blue);
 
     setLedWS2812(red, green, blue);
     mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_RGB), red, green, blue);
@@ -183,13 +180,13 @@ void setLedColorRGB(uint8_t red, uint8_t green, uint8_t blue) {
 
 void setSunriseState(enum State state) {
   gSunriseState = state;
-  Serial.printf("Set Switch Sunrise Mode to %s\n", getMqttPayload(gSunriseState));
+  Log.info("Set Switch Sunrise Mode to %s", getMqttPayload(gSunriseState));
   mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_SUNRISE), gSunriseState);
 }
 
 void setLedState(enum State state) {
   gLedState = state;
-  Serial.printf("Set Switch LED Mode to %s\n", getMqttPayload(gLedState));
+  Log.info("Set Switch LED Mode to %s", getMqttPayload(gLedState));
   mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_STATE), gLedState);
 }
 
@@ -225,14 +222,14 @@ void ledSunriseLoop() {
   uint16_t leds_in_level = pixels_active % LED_NUM;
 
   if (progress > 1.0) {
-    Serial.printf("SUNRISE finish\n");
+    Log.info("SUNRISE finish");
     setSunriseState(STATE_OFF);
     setLedColorRGB(SUNRISE_BRIGHTNESS_MAX, SUNRISE_BRIGHTNESS_MAX, SUNRISE_BRIGHTNESS_MAX);
     return;
   }
 
   if (level != sunriseCurrentLevel || leds_in_level != sunriseCurrentLedsInLevel) {
-    Serial.printf("> SUNRISE: progress=%f, sunrise_intensity=%f, pixels_active=%d, level=%d, leds_next_level=%d\n", progress, sunrise_intensity, pixels_active, level, leds_in_level);
+    Log.debug("> SUNRISE: progress=%f, sunrise_intensity=%f, pixels_active=%d, level=%d, leds_next_level=%d", progress, sunrise_intensity, pixels_active, level, leds_in_level);
   
     for (int i=0; i<LED_NUM; i++) {
       if (i < leds_in_level) {
@@ -259,18 +256,18 @@ void ledColorLoop() {
   static State prevSunriseState = STATE_OFF;
 
   if (gLedState != prevLedState) {
-    Serial.printf("LED %s\n", getMqttPayload(gLedState));
+    Log.info("LED %s", getMqttPayload(gLedState));
     mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_STATE), gLedState);
   }
 
   if (prevSunriseState != gSunriseState) {
-    Serial.printf("Switch Sunrise Mode %s\n", getMqttPayload(gSunriseState));
+    Log.info("Switch Sunrise Mode %s", getMqttPayload(gSunriseState));
     mqtt.publishMessage(mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_SUNRISE), gSunriseState);
   }
 
   if (gSunriseState == STATE_ON) {
     if (prevSunriseState == STATE_OFF) { // Sunrise started
-      Serial.printf("Sunrise mode started\n");
+      Log.info("Sunrise mode started");
       setLedColorRGB(0, 0, 0);
       setLedState(STATE_ON);
       sunriseStartTimeMs = millis();
@@ -292,14 +289,7 @@ void ledColorLoop() {
 }
 
 void mqtt_callback(char* topic, byte* payload, unsigned int len) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-
-  for (int i=0; i<len; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
+  Log.debug("Message arrived [%s] %s", topic, Log.getString(payload, len).c_str());
 
   if (isTopicEqual(topic, mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_SUNRISE_SET))) {
     gSunriseState = getStateFromMqttPayload((char*)payload, len);
@@ -314,17 +304,16 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
   }
   else if (isTopicEqual(topic, MQTT_TOPIC_HOMEASSISTANT_STATUS)) {
     if (isPayloadEqual<MQTT_PAYLOAD_ONLINE>((char*) payload, len)) {
-      Serial.println("Home Assistant is connected");
+      Log.info("Home Assistant is connected");
       // Publish current state unkown if reboot
     }
   }
   else if (isTopicEqual(topic, MQTT_TOPIC_OTA_CHECK_UPDATE)) {
-    Serial.println("Check OTA update requested");
+    Log.debug("Check OTA update requested");
     StaticJsonDocument<256> json;
     DeserializationError error = deserializeJson(json, payload, len);
     if (error) {
-      Serial.print("OTA check update JSON error: ");
-      Serial.println(error.f_str());
+      Log.error("OTA check update JSON error: %s", error.f_str());
     } else {
       const char* url = json["url"];
       if (ota.checkUpdate(url) < 0) {
@@ -337,9 +326,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
     }
   }
   else if (isTopicEqual(topic, mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_UPDATE_COMMAND))) {
-    Serial.println("OTA update command received");
+    Log.debug("OTA update command received");
     if (len == 7 && strncmp((char*)payload, "INSTALL", len) == 0) {
-      Serial.println("Install command valid do update");
+      Log.debug("Install command valid do update");
       mqtt.deleteMessageUpdateCommand();
       if (ota.getExpectedVersion() != VERSION) {
         mqtt.publishMessageUpdateState(ota.getExpectedVersion().c_str(), true);
@@ -347,6 +336,10 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
         mqtt.publishMessageUpdateState(ota.getExpectedVersion().c_str(), false);
       }
     }
+  }
+  else if (isTopicEqual(topic, Log.getMqttTopicLevel())) {
+    Log.debug("Set MQTT log level");
+    Log.setMqttLevel((char*)payload, len);
   }
 }
 

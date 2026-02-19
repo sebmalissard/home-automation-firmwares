@@ -3,11 +3,13 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 
+#include "Logger.h"
+
 constexpr size_t MQTT_MSG_TOPIC_MAX_SIZE  = 64;
 constexpr size_t MQTT_MSG_PAYLOAD_MAX_SIZE = 4096;
 
 /* EXTERNAL MQTT TOPIC */
-// Home Assitant
+// Home Assistant
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_STATUS                = "homeassistant/status";  // ["online", "offline"]
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_SWITCH_SUNRISE_CONFIG = "homeassistant/switch/led_sunrise_%s_%d/config";   // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
 constexpr const char* MQTT_TOPIC_HOMEASSISTANT_LIGHT_CONFIG          = "homeassistant/light/led_light_%s_%d/config";      // %s replaced by ROOM_NAME, %d replaced by SERIAL_NUMBER
@@ -102,8 +104,7 @@ public:
 
     mMqttTopicLedPrefix = MQTT_TOPIC_LED_PREFIX;
     mMqttTopicLedPrefix.replace("%s", roomName);
-    Serial.print("Mqtt topic led prefix: ");
-    Serial.println(mMqttTopicLedPrefix);
+    Log.debug("Mqtt topic led prefix: %s", mMqttTopicLedPrefix);
 
     mMqttTopicSwitchSunriseConfig = MQTT_TOPIC_HOMEASSISTANT_SWITCH_SUNRISE_CONFIG;
     mMqttTopicSwitchSunriseConfig.replace("%s", roomName);
@@ -129,12 +130,9 @@ public:
   }
 
   void publishMessage(const char* topic, const char* payload, bool retain = false) {
-    Serial.print("Publish message [");
-    Serial.print(topic);
-    Serial.print("]: ");
-    Serial.println(payload);
+    Log.info("Publish message [%s]: %s", topic, payload);
     if (!mClient.publish(topic, payload, retain)) {
-      Serial.println("ERROR: Fail to publish message");
+      Log.error("Fail to publish message");
     }
   }
 
@@ -173,8 +171,7 @@ public:
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
-      Serial.print("ERROR: Buffer payload is too small, need: ");
-      Serial.println(size);
+      Log.error("Buffer payload is too small, need: %d", size);
     }
     publishMessage(mMqttTopicSwitchSunriseConfig.c_str(), mMsgPayload, true);
   }
@@ -193,8 +190,7 @@ public:
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
-      Serial.print("ERROR: Buffer payload is too small, need: ");
-      Serial.println(size);
+      Log.error("Buffer payload is too small, need: %d", size);
     }
     publishMessage(mMqttTopicLightConfig.c_str(), mMsgPayload, true);
   }
@@ -213,8 +209,7 @@ public:
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
-      Serial.print("ERROR: Buffer payload is too small, need: ");
-      Serial.println(size);
+      Log.error("Buffer payload is too small, need: %d", size);
     }
     publishMessage(mMqttTopicUpdateConfig.c_str(), mMsgPayload, true);
   }
@@ -232,8 +227,7 @@ public:
     addDeviceJson(config);
     size_t size = serializeJson(config, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
-      Serial.print("ERROR: Buffer payload is too small, need: ");
-      Serial.println(size);
+      Log.error("Buffer payload is too small, need: %d", size);
     }
     publishMessage(mMqttTopicSensorRssiConfig.c_str(), mMsgPayload, true);
   }
@@ -245,8 +239,7 @@ public:
     state["in_progress"] = in_progress;
     size_t size = serializeJson(state, mMsgPayload);
     if (size > MQTT_MSG_PAYLOAD_MAX_SIZE) {
-      Serial.print("ERROR: Buffer payload is too small, need: ");
-      Serial.println(size);
+      Log.error("Buffer payload is too small, need: %d", size);
     }
     publishMessage(getLedTopic(MQTT_TOPIC_LED_SUFFIX_UPDATE_STATE), mMsgPayload, true);
   }
