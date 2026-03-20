@@ -38,7 +38,6 @@ class Logger {
     }
 
     const char* getMqttTopicLevel() {
-      Serial.printf("SSSSSSS '%s'\n", mMqttTopicLogLevel);
       return mMqttTopicLogLevel;
     }
 
@@ -78,8 +77,6 @@ class Logger {
       snprintf(&buf[offset], sizeof(buf) - offset, format, args ...);
 
       Serial.println(buf);
-
-      Serial.printf("mClient=%p, level=%d, mMqttLevel=%d\n", mClient, level, mMqttLevel);
 
       if (mClient && level <= mMqttLevel) {
         if (!mClient->publish(mMqttTopicLog, buf)) {

@@ -14,3 +14,4 @@ pyscript
 .vscode
 __pycache__
 *.zip
+credentials.env

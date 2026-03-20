@@ -66,10 +66,15 @@ if ! cp "${SOURCE_FILE}" "${GEN_FILE}"; then
     fatal "Fail to create file: ${GEN_FILE}"
 fi
 
+if [[ "${SOURCE_FILE}" =~ \.(env|py|sh|yaml|yml)$ ]]; then
+    comment="#"
+else
+    comment="//"
+fi
 sed -i "1s|^|\n|" "${GEN_FILE}"
-sed -i "1s|^|//    ${USER_CMD}\n|" "${GEN_FILE}"
-sed -i "1s|^|// File generated automatically with the following command:\n|" "${GEN_FILE}"
-sed -i "1s|^|// DO NOT MODIFY\n|" "${GEN_FILE}"
+sed -i "1s|^|${comment}    ${USER_CMD}\n|" "${GEN_FILE}"
+sed -i "1s|^|${comment} File generated automatically with the following command:\n|" "${GEN_FILE}"
+sed -i "1s|^|${comment} DO NOT MODIFY\n|" "${GEN_FILE}"
 
 keepassxc_set_error_fatal
 keepassxc_set_database_path "${KEEPASSXC_DATABASE_FILE}"
@@ -99,6 +104,12 @@ while read -r IN; do
         ENTRY=$(echo "${KPXC}" | awk -F '/|/' '{print $3}')
         debug "ENTRY=${ENTRY}"
         SECRET=$(keepassxc_get_password "${ENTRY}")
+        debug "SECRET=${SECRET}"
+        sed -i "${LINE}s|@KPXC.*@|${SECRET}|" "${GEN_FILE}"
+    elif [ "${TYPE}" == "URL" ]; then
+        ENTRY=$(echo "${KPXC}" | awk -F '/|/' '{print $3}')
+        debug "ENTRY=${ENTRY}"
+        SECRET=$(keepassxc_get_url "${ENTRY}")
         debug "SECRET=${SECRET}"
         sed -i "${LINE}s|@KPXC.*@|${SECRET}|" "${GEN_FILE}"
     elif [ "${TYPE}" == "ATTRIBUTE" ]; then

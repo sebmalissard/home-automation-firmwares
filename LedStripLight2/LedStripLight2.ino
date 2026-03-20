@@ -71,8 +71,8 @@ void setup_wifi() {
   }
 
   Log.info("WiFi connecté");
-  Log.info("MAC: %s", WiFi.macAddress());
-  Log.info("Adresse IP: %s", WiFi.localIP());
+  Log.info("MAC: %s", WiFi.macAddress().c_str());
+  Log.info("Adresse IP: %s", WiFi.localIP().toString().c_str());
 }
 
 void setup_mqtt() {
@@ -288,7 +288,13 @@ void ledColorLoop() {
   prevSunriseState = gSunriseState;
 }
 
-void mqtt_callback(char* topic, byte* payload, unsigned int len) {
+void mqtt_callback(char* t, byte* p, unsigned int len) {
+  // Copy to avoid conflic when mqtt log are sent from the callback
+  char topic[MQTT_MSG_TOPIC_MAX_SIZE] = {};
+  byte payload[len+1] = {};
+  strncpy(topic, t, MQTT_MSG_TOPIC_MAX_SIZE - 1);
+  memcpy(payload, p, len);
+
   Log.debug("Message arrived [%s] %s", topic, Log.getString(payload, len).c_str());
 
   if (isTopicEqual(topic, mqtt.getLedTopic(MQTT_TOPIC_LED_SUFFIX_SUNRISE_SET))) {
