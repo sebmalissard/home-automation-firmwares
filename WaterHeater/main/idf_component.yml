@@ -15,3 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_matter: ^1.6.0
+  espressif/button: ^4.2.1
