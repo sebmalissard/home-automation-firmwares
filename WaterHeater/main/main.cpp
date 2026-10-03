@@ -1,3 +1,14 @@
+/*
+Factory Data:
+  Start ESP32 in bootlaoder mode.
+  Backup:
+    esptool --chip esp32c6 -b 115200 -p COM3 read-flash 0x3E0000 0x6000 fctry_backup.bin
+  Generate (WSL):
+    esp-matter-mfg-tool --vendor-id 0xFFF1 --product-id 0x8000 --target esp32c6 --vendor-name "Seb" --product-name "WaterHeater" --hw-ver 1 --hw-ver-str "1.0"   --serial-num "1" --no-secure-cert-bin
+  Write:
+    esptool --chip esp32c6 -b 115200 -p COM3 write_flash 0x3E0000 .\out\fff1_8000\6ef52815-cd6d-45ca-a35c-477ea6be8b16\6ef52815-cd6d-45ca-a35c-477ea6be8b16-partition.bin
+*/
+
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_mac.h>
@@ -278,6 +289,15 @@ extern "C" void app_main()
     /* node handle can be used to add/modify other endpoints. */
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
+
+    /* Expose the optional SerialNumber attribute on the Basic Information cluster.
+     * The value is served at read time by the DeviceInstanceInfoProvider (fctry partition). */
+    endpoint_t *root_endpoint = endpoint::get(node, 0);
+    ABORT_APP_ON_FAILURE(root_endpoint != nullptr, ESP_LOGE(TAG, "Failed to get root endpoint"));
+    cluster_t *basic_cluster = cluster::get(root_endpoint, chip::app::Clusters::BasicInformation::Id);
+    ABORT_APP_ON_FAILURE(basic_cluster != nullptr, ESP_LOGE(TAG, "Failed to get Basic Information cluster"));
+    attribute_t *serial_attr = cluster::basic_information::attribute::create_serial_number(basic_cluster, NULL, 0);
+    ABORT_APP_ON_FAILURE(serial_attr != nullptr, ESP_LOGE(TAG, "Failed to create SerialNumber attribute"));
 
     /* Create an on/off light endpoint */
     on_off_light::config_t light_config = {};
