@@ -31,6 +31,9 @@ Factory Data:
 #include <u8g2.h>
 #include <esp32_hw_i2c.h>
 
+#include <i2cdev.h>
+#include <bme680.h>
+
 #include "common_macros.h"
 #include "utils/i2c_tools.h"
 #include "xiao_esp32c6.h"
@@ -48,6 +51,7 @@ static const gpio_num_t APP_I2C_SCL_GPIO = XIAO_ESP32C6_GPIO_I2C_SCL;
 static const i2c_port_num_t APP_I2C_PORT = XIAO_ESP32C6_I2C_PORT;
 static const uint32_t APP_I2C_CLK_HZ = 400000;
 static const uint8_t APP_I2C_DISPLAY_ADDR = 0x3C; // OLED 128x32 display 7 bits address
+static const uint8_t APP_I2C_BME680_ADDR = 0x77; // BME680 7 bits address
 
 // Log
 static const char *TAG = "app_main";
@@ -56,6 +60,7 @@ static const char *TAG = "app_main";
 button_handle_t g_button_handle = NULL;
 u8g2_t g_u8g2_display;
 static u8g2_esp32_i2c_ctx_t g_u8g2_display_i2c_ctx;
+static bme680_t g_bme680_sensor;
 bool g_perform_factory_reset = false;
 uint16_t g_light_endpoint_id = 0;
 
@@ -97,7 +102,8 @@ esp_err_t led_set_power(esp_matter_attr_val_t *val)
     return err;
 }
 
-void set_display_temp(float temp) {
+void set_display_temp(float temp)
+{
     char buf[16];
     snprintf(buf, sizeof(buf), "%.1f \xb0""C", temp);  // \xb0 = °
 
@@ -105,6 +111,20 @@ void set_display_temp(float temp) {
     u8g2_ClearBuffer(&g_u8g2_display);
     u8g2_DrawStr(&g_u8g2_display, (128 - w) / 2, 31, buf);   // center, line baseline at 31
     u8g2_SendBuffer(&g_u8g2_display);
+}
+
+// Performs one BME680 measurement and returns the temperature in degrees Celsius.
+esp_err_t get_temperature(float *temperature)
+{
+    bme680_values_float_t values;
+    esp_err_t err = bme680_measure_float(&g_bme680_sensor, &values);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BME680 measurement failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    *temperature = values.temperature;
+    return ESP_OK;
 }
 
 //
@@ -286,24 +306,61 @@ void setup()
         ESP_LOGE(TAG, "Failed to setup LED");
     }
 
-    /* Setup display with u8g2 */
-    u8g2_esp32_i2c_config_t u8g2_cfg = U8G2_ESP32_I2C_CONFIG_DEFAULT();
-    u8g2_cfg.i2c_port = APP_I2C_PORT;
-    u8g2_cfg.sda_pin = APP_I2C_SDA_GPIO;
-    u8g2_cfg.scl_pin = APP_I2C_SCL_GPIO;
-    u8g2_cfg.clk_hz = APP_I2C_CLK_HZ;
-    u8g2_cfg.dev_addr_7bit = APP_I2C_DISPLAY_ADDR;
-    g_u8g2_display_i2c_ctx.cfg = u8g2_cfg;
-    err = u8g2_esp32_i2c_set_default_context(&g_u8g2_display_i2c_ctx);
+    /* Setup I2C bus.
+     * The ESP32-C6 has a single I2C master port, shared by the BME680 and the display:
+     * i2cdev (BME680 driver) creates the bus, then u8g2 reuses it through the shared handle. */
+    i2cdev_init();
+
+    err = bme680_init_desc(&g_bme680_sensor, APP_I2C_BME680_ADDR, (i2c_port_t)APP_I2C_PORT, APP_I2C_SDA_GPIO, APP_I2C_SCL_GPIO);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to setup display I2C context");
+        ESP_LOGE(TAG, "Failed to init BME680 descriptor: %s", esp_err_to_name(err));
+    }
+    g_bme680_sensor.i2c_dev.cfg.sda_pullup_en = 1;
+    g_bme680_sensor.i2c_dev.cfg.scl_pullup_en = 1;
+    g_bme680_sensor.i2c_dev.cfg.master.clk_speed = APP_I2C_CLK_HZ;
+
+    /* Probing the sensor makes i2cdev create the I2C master bus (even if the sensor is absent) */
+     esp_err_t bme680_present = i2c_dev_check_present(&g_bme680_sensor.i2c_dev);
+    if (bme680_present != ESP_OK) {
+        ESP_LOGW(TAG, "BME680 not found at 0x%02X: %s", APP_I2C_BME680_ADDR, esp_err_to_name(bme680_present));
     }
 
-    u8g2_Setup_ssd1306_i2c_128x32_univision_f(&g_u8g2_display, U8G2_R0, u8x8_byte_esp32_hw_i2c, u8x8_gpio_and_delay_esp32_i2c);
-    u8g2_InitDisplay(&g_u8g2_display);
-    u8g2_SetPowerSave(&g_u8g2_display, 0);
-    u8g2_SetFont(&g_u8g2_display, u8g2_font_logisoso28_tf);  // ~28 px height
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    err = i2cdev_get_shared_handle((i2c_port_t)APP_I2C_PORT, (void **)&i2c_bus);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get shared I2C bus: %s", esp_err_to_name(err));
+    } else {
+        /* Setup display with u8g2 on the shared bus */
+        u8g2_esp32_i2c_config_t u8g2_cfg = U8G2_ESP32_I2C_CONFIG_DEFAULT();
+        u8g2_cfg.i2c_port = APP_I2C_PORT;
+        u8g2_cfg.sda_pin = APP_I2C_SDA_GPIO;
+        u8g2_cfg.scl_pin = APP_I2C_SCL_GPIO;
+        u8g2_cfg.clk_hz = APP_I2C_CLK_HZ;
+        u8g2_cfg.dev_addr_7bit = APP_I2C_DISPLAY_ADDR;
+        g_u8g2_display_i2c_ctx.cfg = u8g2_cfg;
+        g_u8g2_display_i2c_ctx.bus_handle = i2c_bus;   // u8g2 reuses the bus created by i2cdev
+        g_u8g2_display_i2c_ctx.initialized = 1;        // so it does not try to create its own
+        err = u8g2_esp32_i2c_set_default_context(&g_u8g2_display_i2c_ctx);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to setup display I2C context");
+        }
 
+        u8g2_Setup_ssd1306_i2c_128x32_univision_f(&g_u8g2_display, U8G2_R0, u8x8_byte_esp32_hw_i2c, u8x8_gpio_and_delay_esp32_i2c);
+        u8g2_InitDisplay(&g_u8g2_display);
+        u8g2_SetPowerSave(&g_u8g2_display, 0);
+        u8g2_SetFont(&g_u8g2_display, u8g2_font_logisoso28_tf);  // ~28 px height
+    }
+
+    /* Setup BME680 sensor */
+    if (bme680_present == ESP_OK) {
+        err = bme680_init_sensor(&g_bme680_sensor);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to init BME680 sensor: %s", esp_err_to_name(err));
+        } else {
+            /* Temperature only: no gas measurement (no heater, faster and less self-heating) */
+            bme680_use_heater_profile(&g_bme680_sensor, BME680_HEATER_NOT_USED);
+        }
+    }
 
     /* Set OpenThread platform config */
     esp_openthread_platform_config_t ot_config = {
@@ -323,6 +380,20 @@ void setup()
 }
 
 //
+// Task functions
+//
+
+void update_temperature()
+{
+    float temperature = 0;
+    if (get_temperature(&temperature) == ESP_OK) {
+        ESP_LOGI(TAG, "Temperature: %.2f C", temperature);
+        set_display_temp(temperature);
+    }
+}
+
+
+//
 // Main
 //
 
@@ -332,9 +403,6 @@ extern "C" void app_main()
 
     /* Hardware setup */
     setup();
-
-    // Test display
-    set_display_temp(12.3);
 
     /* Create a Matter node and add the mandatory Root Node device type on endpoint 0 */
     node::config_t node_config;
@@ -389,6 +457,7 @@ extern "C" void app_main()
 #endif
 
     while (true) {
+        update_temperature();
         vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
 }

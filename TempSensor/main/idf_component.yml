@@ -17,3 +17,4 @@ dependencies:
   espressif/esp_matter: ^1.6.0
   espressif/button: ^4.2.1
   nixy4/u8g2: ^0.1.4
+  esp-idf-lib/bme680: ^1.0.7
