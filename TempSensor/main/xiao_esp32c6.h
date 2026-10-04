@@ -1,5 +1,9 @@
 #pragma once
 
+#include <driver/gpio.h>
+#include <driver/i2c_master.h>
+
+// GPIO
 #define XIAO_ESP32C6_GPIO_D0    GPIO_NUM_0
 #define XIAO_ESP32C6_GPIO_D1    GPIO_NUM_1
 #define XIAO_ESP32C6_GPIO_D2    GPIO_NUM_2
@@ -12,3 +16,8 @@
 #define XIAO_ESP32C6_GPIO_D9    GPIO_NUM_20
 #define XIAO_ESP32C6_GPIO_D10   GPIO_NUM_18
 #define XIAO_ESP32C6_GPIO_LED   GPIO_NUM_15
+
+// I2C
+#define XIAO_ESP32C6_GPIO_I2C_SDA   XIAO_ESP32C6_GPIO_D4
+#define XIAO_ESP32C6_GPIO_I2C_SCL   XIAO_ESP32C6_GPIO_D5
+#define XIAO_ESP32C6_I2C_PORT       I2C_NUM_0
