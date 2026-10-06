@@ -12,9 +12,14 @@ Factory Data:
 #include <stdio.h>
 #include <cmath>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_mac.h>
+#include <esp_pm.h>
+#include <esp_timer.h>
 #include <nvs_flash.h>
 
 #include <esp_matter.h>
@@ -42,7 +47,7 @@ Factory Data:
 #include "xiao_esp32c6.h"
 
 // Button
-static const gpio_num_t APP_BUTTON_GPIO = XIAO_ESP32C6_GPIO_D10;
+static const gpio_num_t APP_BUTTON_GPIO = XIAO_ESP32C6_GPIO_D0;
 
 // LED
 static const gpio_num_t APP_LED_GPIO    = XIAO_ESP32C6_GPIO_LED;
@@ -56,6 +61,9 @@ static const uint32_t APP_I2C_CLK_HZ = 400000;
 static const uint8_t APP_I2C_DISPLAY_ADDR = 0x3C; // OLED 128x32 display 7 bits address
 static const uint8_t APP_I2C_BME680_ADDR = 0x77; // BME680 7 bits address
 
+// Display
+static const uint64_t APP_DISPLAY_TIMEOUT_US = 20ULL * 1000 * 1000; // Display stays on 20 s after a button press
+
 // Log
 static const char *TAG = "app_main";
 
@@ -64,6 +72,11 @@ button_handle_t g_button_handle = NULL;
 u8g2_t g_u8g2_display;
 static u8g2_esp32_i2c_ctx_t g_u8g2_display_i2c_ctx;
 static bme680_t g_bme680_sensor;
+static SemaphoreHandle_t g_display_mutex = NULL;      // Protects the display (shared between button, timer and main tasks)
+static esp_timer_handle_t g_display_off_timer = NULL; // One-shot timer that powers the display down
+static bool g_display_ready = false;                  // Display initialized
+static bool g_display_on = false;                     // Display currently powered on
+static float g_last_temperature = NAN;                // Last measured temperature, redrawn when the display wakes up
 bool g_perform_factory_reset = false;
 uint16_t g_light_endpoint_id = 0;
 uint16_t g_temperature_endpoint_id = 0;
@@ -98,7 +111,9 @@ esp_err_t led_set_power(esp_matter_attr_val_t *val)
 
     ESP_LOGI(TAG, "Setting light power to %s", val->val.b ? "ON" : "OFF");
 
+    gpio_hold_dis(APP_LED_GPIO);
     err = gpio_set_level(APP_LED_GPIO, val->val.b ? APP_LED_ACTIVE_LEVEL : !APP_LED_ACTIVE_LEVEL);
+    gpio_hold_en(APP_LED_GPIO); // Keep state across deep sleep cycles
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set LED GPIO level");
     }
@@ -106,7 +121,8 @@ esp_err_t led_set_power(esp_matter_attr_val_t *val)
     return err;
 }
 
-void set_display_temp(float temp)
+// Draws the temperature on the display. The caller must hold g_display_mutex and the display must be on.
+static void draw_display_temp(float temp)
 {
     char buf[16];
     snprintf(buf, sizeof(buf), "%.1f \xb0""C", temp);  // \xb0 = °
@@ -115,6 +131,59 @@ void set_display_temp(float temp)
     u8g2_ClearBuffer(&g_u8g2_display);
     u8g2_DrawStr(&g_u8g2_display, (128 - w) / 2, 31, buf);   // center, line baseline at 31
     u8g2_SendBuffer(&g_u8g2_display);
+}
+
+// Stores the temperature and refreshes the display only if it is currently on (no I2C traffic otherwise).
+void set_display_temp(float temp)
+{
+    if (!g_display_ready) {
+        return;
+    }
+
+    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
+    g_last_temperature = temp;
+    if (g_display_on) {
+        draw_display_temp(temp);
+    }
+    xSemaphoreGive(g_display_mutex);
+}
+
+// Timer callback: powers the display down.
+static void display_off_timer_cb(void *arg)
+{
+    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
+    if (g_display_on) {
+        u8g2_SetPowerSave(&g_u8g2_display, 1);
+        g_display_on = false;
+        ESP_LOGI(TAG, "Display off");
+    }
+    xSemaphoreGive(g_display_mutex);
+}
+
+// Powers the display on (if needed) and (re)starts the auto power-down timer.
+void display_wake()
+{
+    if (!g_display_ready) {
+        return;
+    }
+
+    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
+    if (!g_display_on) {
+        u8g2_SetPowerSave(&g_u8g2_display, 0);
+        g_display_on = true;
+        ESP_LOGI(TAG, "Display on");
+    }
+    if (std::isfinite(g_last_temperature)) {
+        draw_display_temp(g_last_temperature);
+    }
+
+    /* Restart the timer: a new press extends the display time to a full APP_DISPLAY_TIMEOUT_US */
+    esp_timer_stop(g_display_off_timer); // Returns an error if not running, which is fine
+    esp_err_t err = esp_timer_start_once(g_display_off_timer, APP_DISPLAY_TIMEOUT_US);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start display off timer: %s", esp_err_to_name(err));
+    }
+    xSemaphoreGive(g_display_mutex);
 }
 
 // Performs one BME680 measurement and returns the temperature in degrees Celsius.
@@ -137,6 +206,12 @@ esp_err_t get_temperature(float *temperature)
 // which also notifies subscribers.
 esp_err_t set_matter_temperature(int16_t centi_celsius)
 {
+    static constexpr int16_t TEMP_REPORT_THRESHOLD = 10; // repport accuracy 0.10 °C
+    static int16_t last_value = -10000;
+
+    if (abs(centi_celsius - last_value) < TEMP_REPORT_THRESHOLD) {
+        return ESP_OK; // No change
+    }
     esp_matter::lock::ScopedChipStackLock stack_lock(portMAX_DELAY);
 
     chip::app::ServerClusterInterface *iface = esp_matter::data_model::provider::get_instance().registry().Get(
@@ -147,6 +222,12 @@ esp_err_t set_matter_temperature(int16_t centi_celsius)
 
     auto *cluster = static_cast<chip::app::Clusters::TemperatureMeasurementCluster *>(iface);
     CHIP_ERROR err = cluster->SetMeasuredValue(chip::app::DataModel::MakeNullable(centi_celsius));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "Failed to set Matter temperature: %" CHIP_ERROR_FORMAT, err.Format());
+    } else {
+        last_value = centi_celsius;
+    }
+
     return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
 }
 
@@ -157,6 +238,7 @@ esp_err_t set_matter_temperature(int16_t centi_celsius)
 static void button_app_toggle_cb(void *arg, void *data)
 {
     ESP_LOGI(TAG, "Toggle button pressed");
+    display_wake();
     uint16_t endpoint_id = g_light_endpoint_id;
     uint32_t cluster_id = OnOff::Id;
     uint32_t attribute_id = OnOff::Attributes::OnOff::Id;
@@ -286,12 +368,46 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 // Setup
 //
 
+// Enables automatic light sleep. CONFIG_PM_ENABLE alone does nothing until esp_pm_configure() is called:
+// without it the CPU stays at full speed and never sleeps, even when the Thread device is a sleepy end device.
+static void power_management_init()
+{
+#if CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 40, // ESP32-C6 XTAL frequency
+        .light_sleep_enable = true,
+    };
+    esp_err_t err = esp_pm_configure(&pm_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure power management: %s", esp_err_to_name(err));
+    }
+#endif
+}
+
 void setup()
 {
     esp_err_t err;
 
     /* Init the ESP NVS layer */
     nvs_flash_init();
+
+    /* Display auto power-down: mutex + one-shot timer (created before the button callbacks can fire) */
+    g_display_mutex = xSemaphoreCreateMutex();
+    if (g_display_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create display mutex");
+    }
+    const esp_timer_create_args_t display_timer_args = {
+        .callback = display_off_timer_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "display_off",
+        .skip_unhandled_events = false,
+    };
+    err = esp_timer_create(&display_timer_args, &g_display_off_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create display off timer: %s", esp_err_to_name(err));
+    }
 
     /* Debug: scan I2C */
     i2c_scan(XIAO_ESP32C6_I2C_PORT, XIAO_ESP32C6_GPIO_I2C_SDA, XIAO_ESP32C6_GPIO_I2C_SCL);
@@ -303,6 +419,7 @@ void setup()
     button_gpio_config_t button_gpio_config = {
         .gpio_num = APP_BUTTON_GPIO,
         .active_level = 0,
+        .enable_power_save = true,
     };
     err = iot_button_new_gpio_device(&button_config, &button_gpio_config, &g_button_handle);
     if (err != ESP_OK) {
@@ -370,8 +487,14 @@ void setup()
 
         u8g2_Setup_ssd1306_i2c_128x32_univision_f(&g_u8g2_display, U8G2_R0, u8x8_byte_esp32_hw_i2c, u8x8_gpio_and_delay_esp32_i2c);
         u8g2_InitDisplay(&g_u8g2_display);
-        u8g2_SetPowerSave(&g_u8g2_display, 0);
         u8g2_SetFont(&g_u8g2_display, u8g2_font_logisoso28_tf);  // ~28 px height
+
+        /* The display starts powered down: a button press turns it on for APP_DISPLAY_TIMEOUT_US */
+        u8g2_ClearBuffer(&g_u8g2_display);
+        u8g2_SendBuffer(&g_u8g2_display);
+        u8g2_SetPowerSave(&g_u8g2_display, 1);
+        g_display_on = false;
+        g_display_ready = (g_display_mutex != NULL && g_display_off_timer != NULL);
     }
 
     /* Setup BME680 sensor */
@@ -502,8 +625,11 @@ extern "C" void app_main()
     esp_matter::console::init();
 #endif
 
+    /* Enable automatic light sleep */
+    power_management_init();
+
     while (true) {
         update_temperature();
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
+        vTaskDelay(20000 / portTICK_PERIOD_MS);
     }
 }
