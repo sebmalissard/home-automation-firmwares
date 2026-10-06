@@ -4,12 +4,13 @@ Factory Data:
   Backup:
     esptool --chip esp32c6 -b 115200 -p COM3 read-flash 0x3E0000 0x6000 fctry_backup.bin
   Generate (WSL):
-    esp-matter-mfg-tool --vendor-id 0xFFF1 --product-id 0x8000 --target esp32c6 --vendor-name "Seb" --product-name "WaterHeater" --hw-ver 1 --hw-ver-str "1.0"   --serial-num "1" --no-secure-cert-bin
+    esp-matter-mfg-tool --vendor-id 0xFFF1 --product-id 0x8001 --target esp32c6 --vendor-name "Seb" --product-name "TempSensor" --hw-ver 1 --hw-ver-str "1.0" --serial-num "1001" --no-secure-cert-bin
   Write:
-    esptool --chip esp32c6 -b 115200 -p COM3 write_flash 0x3E0000 .\out\fff1_8000\6ef52815-cd6d-45ca-a35c-477ea6be8b16\6ef52815-cd6d-45ca-a35c-477ea6be8b16-partition.bin
+    esptool --chip esp32c6 -b 115200 -p COM3 write_flash 0x3E0000 .\out\fff1_8001\89ea4b87-5de9-43fa-9e21-15022167918f\89ea4b87-5de9-43fa-9e21-15022167918f-partition.bin
 */
 
 #include <stdio.h>
+#include <cmath>
 
 #include <esp_err.h>
 #include <esp_log.h>
@@ -19,6 +20,8 @@ Factory Data:
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
+#include <data_model_provider/esp_matter_data_model_provider.h>
+#include <app/clusters/temperature-measurement-server/TemperatureMeasurementCluster.h>
 
 #include <platform/ESP32/OpenthreadLauncher.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -63,6 +66,7 @@ static u8g2_esp32_i2c_ctx_t g_u8g2_display_i2c_ctx;
 static bme680_t g_bme680_sensor;
 bool g_perform_factory_reset = false;
 uint16_t g_light_endpoint_id = 0;
+uint16_t g_temperature_endpoint_id = 0;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -125,6 +129,25 @@ esp_err_t get_temperature(float *temperature)
 
     *temperature = values.temperature;
     return ESP_OK;
+}
+
+// Updates the Matter TemperatureMeasurement::MeasuredValue (in 0.01 degC).
+// The cluster is code-driven: it owns the MeasuredValue and serves reads/subscriptions itself, so
+// attribute::update() (esp-matter storage only) is not enough. Use the cluster setter instead,
+// which also notifies subscribers.
+esp_err_t set_matter_temperature(int16_t centi_celsius)
+{
+    esp_matter::lock::ScopedChipStackLock stack_lock(portMAX_DELAY);
+
+    chip::app::ServerClusterInterface *iface = esp_matter::data_model::provider::get_instance().registry().Get(
+        chip::app::ConcreteClusterPath(g_temperature_endpoint_id, TemperatureMeasurement::Id));
+    if (iface == nullptr) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    auto *cluster = static_cast<chip::app::Clusters::TemperatureMeasurementCluster *>(iface);
+    CHIP_ERROR err = cluster->SetMeasuredValue(chip::app::DataModel::MakeNullable(centi_celsius));
+    return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
 }
 
 //
@@ -387,8 +410,20 @@ void update_temperature()
 {
     float temperature = 0;
     if (get_temperature(&temperature) == ESP_OK) {
+        esp_err_t err;
+
         ESP_LOGI(TAG, "Temperature: %.2f C", temperature);
         set_display_temp(temperature);
+
+        if (!std::isfinite(temperature) || temperature < -273.15f || temperature > 327.66f) {
+            ESP_LOGE(TAG, "Temperature %.2f C is outside the Matter measurement range", temperature);
+            return;
+        }
+
+        err = set_matter_temperature(static_cast<int16_t>(std::lround(temperature * 100.0f)));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to update Matter temperature: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -429,6 +464,17 @@ extern "C" void app_main()
 
     g_light_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Light created with endpoint_id %d", g_light_endpoint_id);
+
+    /* Create a Matter temperature sensor endpoint */
+    temperature_sensor::config_t temperature_config = {};
+    temperature_config.temperature_measurement.measured_value = nullable<int16_t>();
+    temperature_config.temperature_measurement.min_measured_value = nullable<int16_t>(-4000);
+    temperature_config.temperature_measurement.max_measured_value = nullable<int16_t>(8500);
+    endpoint = temperature_sensor::create(node, &temperature_config, ENDPOINT_FLAG_NONE, nullptr);
+    ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create temperature sensor endpoint"));
+
+    g_temperature_endpoint_id = endpoint::get_id(endpoint);
+    ESP_LOGI(TAG, "Temperature sensor created with endpoint_id %d", g_temperature_endpoint_id);
 
     /* Matter start */
     err = esp_matter::start(app_event_cb);
