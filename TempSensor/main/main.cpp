@@ -27,6 +27,7 @@ Factory Data:
 #include <esp_matter_ota.h>
 #include <data_model_provider/esp_matter_data_model_provider.h>
 #include <app/clusters/temperature-measurement-server/TemperatureMeasurementCluster.h>
+#include <app/clusters/relative-humidity-measurement-server/RelativeHumidityMeasurementCluster.h>
 
 #include <platform/ESP32/OpenthreadLauncher.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -64,6 +65,10 @@ static const uint8_t APP_I2C_BME680_ADDR = 0x77; // BME680 7 bits address
 // Display
 static const uint64_t APP_DISPLAY_TIMEOUT_US = 20ULL * 1000 * 1000; // Display stays on 20 s after a button press
 
+// Matter
+static constexpr int16_t TEMP_REPORT_THRESHOLD = 10;        // repport accuracy 0.1 °C
+static constexpr int16_t HUMIDITY_REPORT_THRESHOLD = 10;    // report accuracy 0.1 %
+
 // Log
 static const char *TAG = "app_main";
 
@@ -78,8 +83,8 @@ static bool g_display_ready = false;                  // Display initialized
 static bool g_display_on = false;                     // Display currently powered on
 static float g_last_temperature = NAN;                // Last measured temperature, redrawn when the display wakes up
 bool g_perform_factory_reset = false;
-uint16_t g_light_endpoint_id = 0;
 uint16_t g_temperature_endpoint_id = 0;
+uint16_t g_humidity_endpoint_id = 0;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -186,8 +191,8 @@ void display_wake()
     xSemaphoreGive(g_display_mutex);
 }
 
-// Performs one BME680 measurement and returns the temperature in degrees Celsius.
-esp_err_t get_temperature(float *temperature)
+// Performs one BME680 measurement and returns the temperature (degC) and relative humidity (%).
+esp_err_t get_measurements(float *temperature, float *humidity)
 {
     bme680_values_float_t values;
     esp_err_t err = bme680_measure_float(&g_bme680_sensor, &values);
@@ -197,6 +202,7 @@ esp_err_t get_temperature(float *temperature)
     }
 
     *temperature = values.temperature;
+    *humidity = values.humidity;
     return ESP_OK;
 }
 
@@ -206,7 +212,6 @@ esp_err_t get_temperature(float *temperature)
 // which also notifies subscribers.
 esp_err_t set_matter_temperature(int16_t centi_celsius)
 {
-    static constexpr int16_t TEMP_REPORT_THRESHOLD = 10; // repport accuracy 0.10 °C
     static int16_t last_value = -10000;
 
     if (abs(centi_celsius - last_value) < TEMP_REPORT_THRESHOLD) {
@@ -231,6 +236,34 @@ esp_err_t set_matter_temperature(int16_t centi_celsius)
     return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
 }
 
+// Updates the Matter RelativeHumidityMeasurement::MeasuredValue (in 0.01 %).
+// Like temperature, the cluster is code-driven: use the cluster setter, not attribute::update().
+esp_err_t set_matter_humidity(uint16_t centi_percent)
+{
+    static uint16_t last_value = -10000;
+
+    if (abs(centi_percent - last_value) < HUMIDITY_REPORT_THRESHOLD) {
+        return ESP_OK; // No change
+    }
+    esp_matter::lock::ScopedChipStackLock stack_lock(portMAX_DELAY);
+
+    chip::app::ServerClusterInterface *iface = esp_matter::data_model::provider::get_instance().registry().Get(
+        chip::app::ConcreteClusterPath(g_humidity_endpoint_id, RelativeHumidityMeasurement::Id));
+    if (iface == nullptr) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    auto *cluster = static_cast<chip::app::Clusters::RelativeHumidityMeasurementCluster *>(iface);
+    CHIP_ERROR err = cluster->SetMeasuredValue(chip::app::DataModel::MakeNullable(centi_percent));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "Failed to set Matter humidity: %" CHIP_ERROR_FORMAT, err.Format());
+    } else {
+        last_value = centi_percent;
+    }
+
+    return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
+}
+
 //
 // Callbacks
 //
@@ -239,16 +272,6 @@ static void button_app_toggle_cb(void *arg, void *data)
 {
     ESP_LOGI(TAG, "Toggle button pressed");
     display_wake();
-    uint16_t endpoint_id = g_light_endpoint_id;
-    uint32_t cluster_id = OnOff::Id;
-    uint32_t attribute_id = OnOff::Attributes::OnOff::Id;
-
-    attribute_t *attribute = attribute::get(endpoint_id, cluster_id, attribute_id);
-
-    esp_matter_attr_val_t val;
-    attribute::get_val(attribute, &val);
-    val.val.b = !val.val.b;
-    attribute::update(endpoint_id, cluster_id, attribute_id, &val);
 }
 
 static void button_factory_reset_pressed_cb(void *arg, void *data)
@@ -268,21 +291,12 @@ static void button_factory_reset_released_cb(void *arg, void *data)
     }
 }
 
-// This callback is called for every attribute update. The callback implementation shall
-// handle the desired attributes and return an appropriate error code. If the attribute
-// is not of your interest, please do not return an error code and strictly return ESP_OK.
+// This callback is called for every attribute update. The sensors only publish values from the firmware,
+// so there is nothing to handle here: just return ESP_OK.
 static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
                                          uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
-    esp_err_t err = ESP_OK;
-
-    if (type == PRE_UPDATE) {
-        if (endpoint_id == g_light_endpoint_id && cluster_id == OnOff::Id && attribute_id == OnOff::Attributes::OnOff::Id) {
-            err = led_set_power(val);
-        }
-    }
-
-    return err;
+    return ESP_OK;
 }
 
 // This callback is invoked when clients interact with the Identify Cluster.
@@ -529,23 +543,32 @@ void setup()
 // Task functions
 //
 
-void update_temperature()
+void update_measurements()
 {
     float temperature = 0;
-    if (get_temperature(&temperature) == ESP_OK) {
-        esp_err_t err;
+    float humidity = 0;
+    if (get_measurements(&temperature, &humidity) != ESP_OK) {
+        return;
+    }
 
-        ESP_LOGI(TAG, "Temperature: %.2f C", temperature);
-        set_display_temp(temperature);
+    ESP_LOGI(TAG, "Temperature: %.2f C, humidity: %.2f %%", temperature, humidity);
+    set_display_temp(temperature);
 
-        if (!std::isfinite(temperature) || temperature < -273.15f || temperature > 327.66f) {
-            ESP_LOGE(TAG, "Temperature %.2f C is outside the Matter measurement range", temperature);
-            return;
-        }
-
-        err = set_matter_temperature(static_cast<int16_t>(std::lround(temperature * 100.0f)));
+    if (!std::isfinite(temperature) || temperature < -273.15f || temperature > 327.66f) {
+        ESP_LOGE(TAG, "Temperature %.2f C is outside the Matter measurement range", temperature);
+    } else {
+        esp_err_t err = set_matter_temperature(static_cast<int16_t>(std::lround(temperature * 100.0f)));
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to update Matter temperature: %s", esp_err_to_name(err));
+        }
+    }
+
+    if (!std::isfinite(humidity) || humidity < 0.0f || humidity > 100.0f) {
+        ESP_LOGE(TAG, "Humidity %.2f %% is outside the Matter measurement range", humidity);
+    } else {
+        esp_err_t err = set_matter_humidity(static_cast<uint16_t>(std::lround(humidity * 100.0f)));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to update Matter humidity: %s", esp_err_to_name(err));
         }
     }
 }
@@ -558,6 +581,7 @@ void update_temperature()
 extern "C" void app_main() 
 {
     esp_err_t err = ESP_OK;
+    endpoint_t *endpoint = nullptr;
 
     /* Hardware setup */
     setup();
@@ -578,16 +602,6 @@ extern "C" void app_main()
     attribute_t *serial_attr = cluster::basic_information::attribute::create_serial_number(basic_cluster, NULL, 0);
     ABORT_APP_ON_FAILURE(serial_attr != nullptr, ESP_LOGE(TAG, "Failed to create SerialNumber attribute"));
 
-    /* Create an on/off light endpoint */
-    on_off_light::config_t light_config = {};
-    light_config.on_off.on_off = true;
-    light_config.on_off_lighting.start_up_on_off = nullptr;
-    endpoint_t *endpoint = on_off_light::create(node, &light_config, ENDPOINT_FLAG_NONE, nullptr);
-    ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create on/off light endpoint"));
-
-    g_light_endpoint_id = endpoint::get_id(endpoint);
-    ESP_LOGI(TAG, "Light created with endpoint_id %d", g_light_endpoint_id);
-
     /* Create a Matter temperature sensor endpoint */
     temperature_sensor::config_t temperature_config = {};
     temperature_config.temperature_measurement.measured_value = nullable<int16_t>();
@@ -599,15 +613,20 @@ extern "C" void app_main()
     g_temperature_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Temperature sensor created with endpoint_id %d", g_temperature_endpoint_id);
 
+    /* Create a Matter humidity sensor endpoint */
+    humidity_sensor::config_t humidity_config = {};
+    humidity_config.relative_humidity_measurement.measured_value = nullable<uint16_t>();
+    humidity_config.relative_humidity_measurement.min_measured_value = nullable<uint16_t>(0);
+    humidity_config.relative_humidity_measurement.max_measured_value = nullable<uint16_t>(10000);
+    endpoint = humidity_sensor::create(node, &humidity_config, ENDPOINT_FLAG_NONE, nullptr);
+    ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create humidity sensor endpoint"));
+
+    g_humidity_endpoint_id = endpoint::get_id(endpoint);
+    ESP_LOGI(TAG, "Humidity sensor created with endpoint_id %d", g_humidity_endpoint_id);
+
     /* Matter start */
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
-
-    /* Set initial light state */
-    esp_matter_attr_val_t val;
-    attribute_t *attribute = attribute::get(g_light_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id);
-    attribute::get_val(attribute, &val);
-    led_set_power(&val);
 
 
 #if CONFIG_ENABLE_ENCRYPTED_OTA
@@ -629,7 +648,7 @@ extern "C" void app_main()
     power_management_init();
 
     while (true) {
-        update_temperature();
+        update_measurements();
         vTaskDelay(20000 / portTICK_PERIOD_MS);
     }
 }
