@@ -69,6 +69,10 @@ static const uint64_t APP_DISPLAY_TIMEOUT_US = 20ULL * 1000 * 1000; // Display s
 static constexpr int16_t TEMP_REPORT_THRESHOLD = 10;        // repport accuracy 0.1 °C
 static constexpr int16_t HUMIDITY_REPORT_THRESHOLD = 10;    // report accuracy 0.1 %
 
+// Identify
+static const uint64_t APP_LED_IDENTIFY_BLINK_MS = 250; // LED toggles every 250 ms while identifying
+static const uint64_t APP_LED_IDENTIFY_PERIOD_MS = 30 * 1000; // LED toggles during 30 seconds maximum while identifying
+
 // Log
 static const char *TAG = "app_main";
 
@@ -79,12 +83,15 @@ static u8g2_esp32_i2c_ctx_t g_u8g2_display_i2c_ctx;
 static bme680_t g_bme680_sensor;
 static SemaphoreHandle_t g_display_mutex = NULL;      // Protects the display (shared between button, timer and main tasks)
 static esp_timer_handle_t g_display_off_timer = NULL; // One-shot timer that powers the display down
+static esp_timer_handle_t g_led_identify_timer = NULL;// Periodic timer that toggles the LED while identifying
 static bool g_display_ready = false;                  // Display initialized
 static bool g_display_on = false;                     // Display currently powered on
 static float g_last_temperature = NAN;                // Last measured temperature, redrawn when the display wakes up
 bool g_perform_factory_reset = false;
 uint16_t g_temperature_endpoint_id = 0;
 uint16_t g_humidity_endpoint_id = 0;
+static bool g_led_identify_power_on = false;
+static int32_t g_led_identify_toggles_cnt = -1;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -105,19 +112,14 @@ static const uint16_t s_decryption_key_len = decryption_key_end - decryption_key
 // Driver functions
 //
 
-esp_err_t led_set_power(esp_matter_attr_val_t *val)
+esp_err_t led_set_power(bool on)
 {
     esp_err_t err = ESP_OK;
 
-    if (val->type != ESP_MATTER_VAL_TYPE_BOOLEAN) {
-        ESP_LOGE(TAG, "Invalid value type for LED power: %d", val->type);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Setting light power to %s", val->val.b ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Setting LED power to %s", on ? "ON" : "OFF");
 
     gpio_hold_dis(APP_LED_GPIO);
-    err = gpio_set_level(APP_LED_GPIO, val->val.b ? APP_LED_ACTIVE_LEVEL : !APP_LED_ACTIVE_LEVEL);
+    err = gpio_set_level(APP_LED_GPIO, on ? APP_LED_ACTIVE_LEVEL : !APP_LED_ACTIVE_LEVEL);
     gpio_hold_en(APP_LED_GPIO); // Keep state across deep sleep cycles
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set LED GPIO level");
@@ -264,6 +266,33 @@ esp_err_t set_matter_humidity(uint16_t centi_percent)
     return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
 }
 
+void identify_blink_start(int32_t toggles)
+{
+    if (g_led_identify_timer == NULL) {
+        return;
+    }
+    g_led_identify_toggles_cnt = toggles;
+    if (!esp_timer_is_active(g_led_identify_timer)) {
+        g_led_identify_power_on = true;
+        led_set_power(true);
+        esp_err_t err = esp_timer_start_periodic(g_led_identify_timer, APP_LED_IDENTIFY_BLINK_MS * 1000);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start identify blink timer: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+void identify_blink_stop()
+{
+    if (g_led_identify_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(g_led_identify_timer);
+    g_led_identify_toggles_cnt = -1;
+    g_led_identify_power_on = false;
+    led_set_power(false);
+}
+
 //
 // Callbacks
 //
@@ -291,6 +320,20 @@ static void button_factory_reset_released_cb(void *arg, void *data)
     }
 }
 
+static void led_identify_blink_timer_cb(void *arg)
+{
+    g_led_identify_power_on = !g_led_identify_power_on;
+    g_led_identify_toggles_cnt--;
+
+    if (g_led_identify_toggles_cnt < 0) {
+        esp_timer_stop(g_led_identify_timer);
+        g_led_identify_power_on = false;
+        led_set_power(false);
+    } else {
+        led_set_power(g_led_identify_power_on);
+    }
+}
+
 // This callback is called for every attribute update. The sensors only publish values from the firmware,
 // so there is nothing to handle here: just return ESP_OK.
 static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
@@ -300,10 +343,24 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
 }
 
 // This callback is invoked when clients interact with the Identify Cluster.
-// In the callback implementation, an endpoint can identify itself. (e.g., by flashing an LED or light).
+// The LED blinks while the endpoint is identifying (Identify command) or for ~3 s (TriggerEffect).
 static esp_err_t app_identification_cb(identification::callback_type_t type, uint16_t endpoint_id, uint8_t effect_id,
                                        uint8_t effect_variant, void *priv_data) {
-    ESP_LOGI(TAG, "Identification callback: type: %u, effect: %u, variant: %u", type, effect_id, effect_variant);
+    ESP_LOGI(TAG, "Identification callback: endpoint: %u, type: %u, effect: %u, variant: %u",
+             endpoint_id, type, effect_id, effect_variant);
+
+    switch (type) {
+        case identification::START:
+        case identification::EFFECT:
+            identify_blink_start(APP_LED_IDENTIFY_PERIOD_MS/APP_LED_IDENTIFY_BLINK_MS);
+            break;
+        case identification::STOP:
+            identify_blink_stop();
+            break;
+        default:
+            break;
+    }
+
     return ESP_OK;
 }
 
@@ -458,6 +515,20 @@ void setup()
     err |= gpio_set_direction(APP_LED_GPIO, GPIO_MODE_OUTPUT);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to setup LED");
+    }
+    led_set_power(false);
+
+    /* Identify blink timer (periodic, started/stopped by the Identify cluster callback) */
+    const esp_timer_create_args_t led_identify_timer_args = {
+        .callback = led_identify_blink_timer_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "led_identify_blink",
+        .skip_unhandled_events = false,
+    };
+    err = esp_timer_create(&led_identify_timer_args, &g_led_identify_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create led identify blink timer: %s", esp_err_to_name(err));
     }
 
     /* Setup I2C bus.
