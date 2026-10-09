@@ -7,6 +7,12 @@ Factory Data:
     esp-matter-mfg-tool --vendor-id 0xFFF1 --product-id 0x8001 --target esp32c6 --vendor-name "Seb" --product-name "TempSensor" --hw-ver 1 --hw-ver-str "1.0" --serial-num "1001" --no-secure-cert-bin
   Write:
     esptool --chip esp32c6 -b 115200 -p COM3 write_flash 0x3E0000 .\out\fff1_8001\89ea4b87-5de9-43fa-9e21-15022167918f\89ea4b87-5de9-43fa-9e21-15022167918f-partition.bin
+
+OTA Matter:
+  Generate:
+    python3 managed_components/espressif__esp_matter/connectedhomeip/connectedhomeip/src/app/ota_image_tool.py create -v 0xFFF1 -p 0x8001 -vn 2 -vs "0.2" -da sha256 build/TempSensor.bin build/TempSensor_0.2.ota
+  Show:
+    python3 managed_components/espressif__esp_matter/connectedhomeip/connectedhomeip/src/app/ota_image_tool.py show build/TempSensor_0.2.ota
 */
 
 #include <stdio.h>
