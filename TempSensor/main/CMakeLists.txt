@@ -1,9 +1,11 @@
 idf_component_register(
     SRC_DIRS
         "."
+        "devices"
         "utils"
     PRIV_INCLUDE_DIRS
         "."
+        "devices"
         "utils"
     PRIV_REQUIRES
         esp_driver_gpio

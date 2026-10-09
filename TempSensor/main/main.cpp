@@ -13,12 +13,12 @@ Factory Data:
 #include <cmath>
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_pm.h>
+#include <esp_sleep.h>
 #include <esp_timer.h>
 #include <nvs_flash.h>
 
@@ -37,13 +37,11 @@ Factory Data:
 #include <button_types.h>
 #include <iot_button.h>
 
-#include <u8g2.h>
-#include <esp32_hw_i2c.h>
-
 #include <i2cdev.h>
 #include <bme680.h>
 
 #include "common_macros.h"
+#include "devices/Display.h"
 #include "utils/i2c_tools.h"
 #include "xiao_esp32c6.h"
 
@@ -78,15 +76,9 @@ static const char *TAG = "app_main";
 
 // Global variables
 button_handle_t g_button_handle = NULL;
-u8g2_t g_u8g2_display;
-static u8g2_esp32_i2c_ctx_t g_u8g2_display_i2c_ctx;
+static Display g_display;
 static bme680_t g_bme680_sensor;
-static SemaphoreHandle_t g_display_mutex = NULL;      // Protects the display (shared between button, timer and main tasks)
-static esp_timer_handle_t g_display_off_timer = NULL; // One-shot timer that powers the display down
 static esp_timer_handle_t g_led_identify_timer = NULL;// Periodic timer that toggles the LED while identifying
-static bool g_display_ready = false;                  // Display initialized
-static bool g_display_on = false;                     // Display currently powered on
-static float g_last_temperature = NAN;                // Last measured temperature, redrawn when the display wakes up
 bool g_perform_factory_reset = false;
 uint16_t g_temperature_endpoint_id = 0;
 uint16_t g_humidity_endpoint_id = 0;
@@ -126,71 +118,6 @@ esp_err_t led_set_power(bool on)
     }
 
     return err;
-}
-
-// Draws the temperature on the display. The caller must hold g_display_mutex and the display must be on.
-static void draw_display_temp(float temp)
-{
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%.1f \xb0""C", temp);  // \xb0 = °
-
-    int w = u8g2_GetStrWidth(&g_u8g2_display, buf);
-    u8g2_ClearBuffer(&g_u8g2_display);
-    u8g2_DrawStr(&g_u8g2_display, (128 - w) / 2, 31, buf);   // center, line baseline at 31
-    u8g2_SendBuffer(&g_u8g2_display);
-}
-
-// Stores the temperature and refreshes the display only if it is currently on (no I2C traffic otherwise).
-void set_display_temp(float temp)
-{
-    if (!g_display_ready) {
-        return;
-    }
-
-    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
-    g_last_temperature = temp;
-    if (g_display_on) {
-        draw_display_temp(temp);
-    }
-    xSemaphoreGive(g_display_mutex);
-}
-
-// Timer callback: powers the display down.
-static void display_off_timer_cb(void *arg)
-{
-    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
-    if (g_display_on) {
-        u8g2_SetPowerSave(&g_u8g2_display, 1);
-        g_display_on = false;
-        ESP_LOGI(TAG, "Display off");
-    }
-    xSemaphoreGive(g_display_mutex);
-}
-
-// Powers the display on (if needed) and (re)starts the auto power-down timer.
-void display_wake()
-{
-    if (!g_display_ready) {
-        return;
-    }
-
-    xSemaphoreTake(g_display_mutex, portMAX_DELAY);
-    if (!g_display_on) {
-        u8g2_SetPowerSave(&g_u8g2_display, 0);
-        g_display_on = true;
-        ESP_LOGI(TAG, "Display on");
-    }
-    if (std::isfinite(g_last_temperature)) {
-        draw_display_temp(g_last_temperature);
-    }
-
-    /* Restart the timer: a new press extends the display time to a full APP_DISPLAY_TIMEOUT_US */
-    esp_timer_stop(g_display_off_timer); // Returns an error if not running, which is fine
-    esp_err_t err = esp_timer_start_once(g_display_off_timer, APP_DISPLAY_TIMEOUT_US);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start display off timer: %s", esp_err_to_name(err));
-    }
-    xSemaphoreGive(g_display_mutex);
 }
 
 // Performs one BME680 measurement and returns the temperature (degC) and relative humidity (%).
@@ -297,10 +224,19 @@ void identify_blink_stop()
 // Callbacks
 //
 
+// Called by the button driver each time it goes back to power save mode (no key activity).
+// With CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP the button GPIO wakes the chip through ext1, but the
+// driver disables ext1 on the first press and never re-enables it: without this, only the first press
+// can wake the chip from light sleep and later presses are only seen when the CPU happens to be awake.
+static void button_enter_power_save_cb(void *usr_data)
+{
+    esp_sleep_enable_ext1_wakeup_io(1ULL << APP_BUTTON_GPIO, ESP_EXT1_WAKEUP_ANY_LOW);
+}
+
 static void button_app_toggle_cb(void *arg, void *data)
 {
     ESP_LOGI(TAG, "Toggle button pressed");
-    display_wake();
+    g_display.onButtonPress();
 }
 
 static void button_factory_reset_pressed_cb(void *arg, void *data)
@@ -463,23 +399,6 @@ void setup()
     /* Init the ESP NVS layer */
     nvs_flash_init();
 
-    /* Display auto power-down: mutex + one-shot timer (created before the button callbacks can fire) */
-    g_display_mutex = xSemaphoreCreateMutex();
-    if (g_display_mutex == NULL) {
-        ESP_LOGE(TAG, "Failed to create display mutex");
-    }
-    const esp_timer_create_args_t display_timer_args = {
-        .callback = display_off_timer_cb,
-        .arg = nullptr,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "display_off",
-        .skip_unhandled_events = false,
-    };
-    err = esp_timer_create(&display_timer_args, &g_display_off_timer);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create display off timer: %s", esp_err_to_name(err));
-    }
-
     /* Debug: scan I2C */
     i2c_scan(XIAO_ESP32C6_I2C_PORT, XIAO_ESP32C6_GPIO_I2C_SDA, XIAO_ESP32C6_GPIO_I2C_SCL);
 
@@ -495,6 +414,16 @@ void setup()
     err = iot_button_new_gpio_device(&button_config, &button_gpio_config, &g_button_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create button device");
+    }
+
+    /* Re-arm the ext1 wakeup each time the button driver goes back to power save (see callback) */
+    button_power_save_config_t button_power_save_config = {
+        .enter_power_save_cb = button_enter_power_save_cb,
+        .usr_data = NULL,
+    };
+    err = iot_button_register_power_save_cb(&button_power_save_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register button power save callback");
     }
 
     /* Register button callback for app usage */
@@ -555,31 +484,19 @@ void setup()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get shared I2C bus: %s", esp_err_to_name(err));
     } else {
-        /* Setup display with u8g2 on the shared bus */
-        u8g2_esp32_i2c_config_t u8g2_cfg = U8G2_ESP32_I2C_CONFIG_DEFAULT();
-        u8g2_cfg.i2c_port = APP_I2C_PORT;
-        u8g2_cfg.sda_pin = APP_I2C_SDA_GPIO;
-        u8g2_cfg.scl_pin = APP_I2C_SCL_GPIO;
-        u8g2_cfg.clk_hz = APP_I2C_CLK_HZ;
-        u8g2_cfg.dev_addr_7bit = APP_I2C_DISPLAY_ADDR;
-        g_u8g2_display_i2c_ctx.cfg = u8g2_cfg;
-        g_u8g2_display_i2c_ctx.bus_handle = i2c_bus;   // u8g2 reuses the bus created by i2cdev
-        g_u8g2_display_i2c_ctx.initialized = 1;        // so it does not try to create its own
-        err = u8g2_esp32_i2c_set_default_context(&g_u8g2_display_i2c_ctx);
+        /* Setup display on the shared bus */
+        Display::Config display_config;
+        display_config.i2cBus = i2c_bus;
+        display_config.i2cPort = APP_I2C_PORT;
+        display_config.sdaGpio = APP_I2C_SDA_GPIO;
+        display_config.sclGpio = APP_I2C_SCL_GPIO;
+        display_config.i2cClkHz = APP_I2C_CLK_HZ;
+        display_config.i2cAddr = APP_I2C_DISPLAY_ADDR;
+        display_config.timeoutUs = APP_DISPLAY_TIMEOUT_US;
+        err = g_display.init(display_config);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to setup display I2C context");
+            ESP_LOGE(TAG, "Failed to init display: %s", esp_err_to_name(err));
         }
-
-        u8g2_Setup_ssd1306_i2c_128x32_univision_f(&g_u8g2_display, U8G2_R0, u8x8_byte_esp32_hw_i2c, u8x8_gpio_and_delay_esp32_i2c);
-        u8g2_InitDisplay(&g_u8g2_display);
-        u8g2_SetFont(&g_u8g2_display, u8g2_font_logisoso28_tf);  // ~28 px height
-
-        /* The display starts powered down: a button press turns it on for APP_DISPLAY_TIMEOUT_US */
-        u8g2_ClearBuffer(&g_u8g2_display);
-        u8g2_SendBuffer(&g_u8g2_display);
-        u8g2_SetPowerSave(&g_u8g2_display, 1);
-        g_display_on = false;
-        g_display_ready = (g_display_mutex != NULL && g_display_off_timer != NULL);
     }
 
     /* Setup BME680 sensor */
@@ -623,7 +540,8 @@ void update_measurements()
     }
 
     ESP_LOGI(TAG, "Temperature: %.2f C, humidity: %.2f %%", temperature, humidity);
-    set_display_temp(temperature);
+    g_display.updateTemp(temperature);
+    g_display.updateHumidity(humidity);
 
     if (!std::isfinite(temperature) || temperature < -273.15f || temperature > 327.66f) {
         ESP_LOGE(TAG, "Temperature %.2f C is outside the Matter measurement range", temperature);
