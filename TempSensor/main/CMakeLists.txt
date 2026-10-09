@@ -10,6 +10,7 @@ idf_component_register(
     PRIV_REQUIRES
         esp_driver_gpio
         esp_driver_i2c
+        esp_adc
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")

@@ -47,6 +47,7 @@ OTA Matter:
 #include <bme680.h>
 
 #include "common_macros.h"
+#include "devices/Battery.h"
 #include "devices/Display.h"
 #include "utils/i2c_tools.h"
 #include "xiao_esp32c6.h"
@@ -57,6 +58,10 @@ static const gpio_num_t APP_BUTTON_GPIO = XIAO_ESP32C6_GPIO_D0;
 // LED
 static const gpio_num_t APP_LED_GPIO    = XIAO_ESP32C6_GPIO_LED;
 static const int APP_LED_ACTIVE_LEVEL   = 0; // Active low
+
+// Battery (LiFePO4) voltage divider: R1 = R2 = 1 MOhm + 100 nF from the midpoint to GND
+static const gpio_num_t APP_BATTERY_ADC_GPIO = XIAO_ESP32C6_GPIO_D1;
+static const float APP_BATTERY_DIVIDER_RATIO = 2.0f; // (R1 + R2) / R2
 
 // I2C
 static const gpio_num_t APP_I2C_SDA_GPIO = XIAO_ESP32C6_GPIO_I2C_SDA;
@@ -83,6 +88,7 @@ static const char *TAG = "app_main";
 // Global variables
 button_handle_t g_button_handle = NULL;
 static Display g_display;
+static Battery g_battery;
 static bme680_t g_bme680_sensor;
 static esp_timer_handle_t g_led_identify_timer = NULL;// Periodic timer that toggles the LED while identifying
 bool g_perform_factory_reset = false;
@@ -453,6 +459,15 @@ void setup()
     }
     led_set_power(false);
 
+    /* Setup battery voltage measurement */
+    Battery::Config battery_config;
+    battery_config.adcGpio = APP_BATTERY_ADC_GPIO;
+    battery_config.dividerRatio = APP_BATTERY_DIVIDER_RATIO;
+    err = g_battery.init(battery_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init battery measurement: %s", esp_err_to_name(err));
+    }
+
     /* Identify blink timer (periodic, started/stopped by the Identify cluster callback) */
     const esp_timer_create_args_t led_identify_timer_args = {
         .callback = led_identify_blink_timer_cb,
@@ -568,6 +583,17 @@ void update_measurements()
     }
 }
 
+void update_battery()
+{
+    float voltage = 0;
+    if (g_battery.readVoltage(&voltage) != ESP_OK) {
+        ESP_LOGE(TAG, "Battery voltage measurement failed");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Battery: %.3f V (%u %%)", voltage, Battery::voltageToPercent(voltage));
+}
+
 
 //
 // Main
@@ -644,6 +670,7 @@ extern "C" void app_main()
 
     while (true) {
         update_measurements();
+        update_battery();
         vTaskDelay(20000 / portTICK_PERIOD_MS);
     }
 }
