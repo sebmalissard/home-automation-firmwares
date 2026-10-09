@@ -17,6 +17,7 @@ OTA Matter:
 
 #include <stdio.h>
 #include <cmath>
+#include <limits>
 
 #include <freertos/FreeRTOS.h>
 
@@ -28,10 +29,12 @@ OTA Matter:
 #include <esp_timer.h>
 #include <nvs_flash.h>
 
+#include <app-common/zap-generated/attributes/Accessors.h>
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
 #include <data_model_provider/esp_matter_data_model_provider.h>
+#include <app/util/MarkAttributeDirty.h>
 #include <app/clusters/temperature-measurement-server/TemperatureMeasurementCluster.h>
 #include <app/clusters/relative-humidity-measurement-server/RelativeHumidityMeasurementCluster.h>
 
@@ -203,6 +206,29 @@ esp_err_t set_matter_humidity(uint16_t centi_percent)
     }
 
     return (err == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t set_matter_battery_voltage(uint32_t millivolts)
+{
+    static uint32_t last_value = 0;
+    static bool has_last_value = false;
+
+    if (has_last_value && millivolts == last_value) {
+        return ESP_OK;
+    }
+
+    esp_matter::lock::ScopedChipStackLock stack_lock(portMAX_DELAY);
+    chip::Protocols::InteractionModel::Status status =
+        chip::app::Clusters::PowerSource::Attributes::BatVoltage::Set(
+            g_temperature_endpoint_id, millivolts, chip::app::MarkAttributeDirty::kYes);
+    if (status != chip::Protocols::InteractionModel::Status::Success) {
+        ESP_LOGE(TAG, "Failed to set Matter battery voltage: status %u", static_cast<unsigned>(status));
+        return ESP_FAIL;
+    }
+
+    last_value = millivolts;
+    has_last_value = true;
+    return ESP_OK;
 }
 
 void identify_blink_start(int32_t toggles)
@@ -586,12 +612,24 @@ void update_measurements()
 void update_battery()
 {
     float voltage = 0;
-    if (g_battery.readVoltage(&voltage) != ESP_OK) {
-        ESP_LOGE(TAG, "Battery voltage measurement failed");
+    esp_err_t err = g_battery.readVoltage(&voltage);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery voltage measurement failed: %s", esp_err_to_name(err));
         return;
     }
 
     ESP_LOGI(TAG, "Battery: %.3f V (%u %%)", voltage, Battery::voltageToPercent(voltage));
+
+    double millivolts = std::round(static_cast<double>(voltage) * 1000.0);
+    if (!std::isfinite(voltage) || millivolts <= 0.0 || millivolts > std::numeric_limits<uint32_t>::max()) {
+        ESP_LOGE(TAG, "Battery voltage %.3f V is outside the Matter measurement range", voltage);
+        return;
+    }
+
+    err = set_matter_battery_voltage(static_cast<uint32_t>(millivolts));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to update Matter battery voltage: %s", esp_err_to_name(err));
+    }
 }
 
 
@@ -633,6 +671,17 @@ extern "C" void app_main()
 
     g_temperature_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Temperature sensor created with endpoint_id %d", g_temperature_endpoint_id);
+
+    /* Add the battery Power Source cluster to the temperature sensor endpoint */
+    cluster::power_source::config_t power_source_config;
+    power_source_config.feature_flags = cluster::power_source::feature::battery::get_id();
+    cluster_t *power_source_cluster = cluster::power_source::create(endpoint, &power_source_config, CLUSTER_FLAG_SERVER);
+    ABORT_APP_ON_FAILURE(power_source_cluster != nullptr, ESP_LOGE(TAG, "Failed to create Power Source cluster"));
+    err = endpoint::add_device_type(endpoint, endpoint::power_source::get_device_type_id(), endpoint::power_source::get_device_type_version());
+    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to add Power Source device type, err:%d", err));
+    attribute_t *battery_voltage_attribute =
+        cluster::power_source::attribute::create_bat_voltage(power_source_cluster, nullable<uint32_t>(), nullable<uint32_t>(0), nullable<uint32_t>(0xFFFF));
+    ABORT_APP_ON_FAILURE(battery_voltage_attribute != nullptr, ESP_LOGE(TAG, "Failed to create battery voltage attribute"));
 
     /* Create a Matter humidity sensor endpoint */
     humidity_sensor::config_t humidity_config = {};
